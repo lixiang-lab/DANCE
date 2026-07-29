@@ -97,6 +97,10 @@ DEEP10M-FD12 Recall@10:
 
 Both builds report zero invalid neighbors and zero self-loops.
 
+## GPU-StitchedVamana release target
+
+The release includes and compiles `gpu_stitched_vamana_index` under the `FILTERED_PAPER` profile. Its fixed path performs label-local GPU Vamana construction, global-ID remapping, edge stitching, sidecar generation, and conditional global pruning. It shares the same FP16 GPU vector representation and FP32 distance accumulation as the filtered profile.
+
 ## Acceptance rules
 
 A release is accepted only if:

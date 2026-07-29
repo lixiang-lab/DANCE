@@ -4,7 +4,7 @@ This is the artifact for:
 
 > **DANCE: GPU-Native Disk-Based Graph Index Construction for Billion-Scale Approximate Nearest Neighbor Search**
 
-The manuscript is being prepared for submission to **PVLDB / VLDB 2027**. This repository contains the latest standard DANCE Vamana and GPU-FilteredVamana implementations used by the paper.
+The manuscript is being prepared for submission to **PVLDB / VLDB 2027**. This repository contains the latest standard DANCE Vamana, GPU-FilteredVamana, and GPU-StitchedVamana implementations used by the paper.
 
 ## Scope
 
@@ -18,6 +18,8 @@ This is intentionally a minimal repository. It contains:
 It does not contain experimental logs, generated results, figures, indexes, datasets, competitor source code, retired implementations, or ablation controls. It also does not mirror the Microsoft DiskANN repository.
 
 GPU-FilteredVamana uses the complete released path: per-label search, union-label search, label-aware pruning, coverage repair, and reverse-edge repair are enabled. Label balancing is disabled.
+
+GPU-StitchedVamana builds one GPU Vamana graph per filter label, remaps the local graphs to global identifiers, stitches their edges, writes label medoids and DiskANN sidecars, and applies the final global prune only when it is required. It is the released route for disjoint or label-partitioned workloads; GPU-FilteredVamana is the released route for overlapping-label workloads.
 
 ## Install into DiskANN
 
@@ -77,6 +79,20 @@ build_filtered/apps/build_memory_index \
 ```
 
 Filtered search uses DiskANN's ordinary `search_memory_index` or `search_disk_index`.
+
+## GPU-StitchedVamana
+
+```bash
+build_filtered/apps/utils/gpu_stitched_vamana_index \
+  --data_type float \
+  --data_path /data/base.fbin \
+  --label_file /data/labels.txt \
+  --index_path_prefix /index/gpu_stitched \
+  --Rsmall 32 --Lsmall 100 --Rstitched 64 \
+  --C 96 --steps 64 --alpha 1.2 --num_threads 32
+```
+
+The executable emits a DiskANN-compatible graph and the label, label-map, label-medoid, and data sidecars required by filtered DiskANN search. For single-label rows with `Rsmall <= Rstitched`, the stitched union is already degree bounded and the global prune is skipped.
 
 ## Reproduction documentation
 

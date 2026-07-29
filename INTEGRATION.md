@@ -21,7 +21,7 @@ git checkout 78256bbab4685e1774e78d331e081a153be26823
 git apply /path/to/DANCE/integrations/dance-diskann-78256bba.patch
 ```
 
-The patch installs the DANCE sources, CMake targets, memory builders, filtered builder, shard builder, optional GPU merge, and DiskANN-compatible serialization.
+The patch installs the DANCE sources, CMake targets, memory builders, GPU-FilteredVamana, GPU-StitchedVamana, shard builder, optional GPU merge, and DiskANN-compatible serialization.
 
 ## Build profiles
 
@@ -67,6 +67,20 @@ Filtered sharded construction uses:
 ```bash
 build_gpu/apps/build_disk_index <DiskANN arguments> --gpu_filtered
 ```
+
+GPU-StitchedVamana construction uses:
+
+```bash
+build_gpu/apps/utils/gpu_stitched_vamana_index \
+  --data_type float \
+  --data_path /data/base.fbin \
+  --label_file /data/labels.txt \
+  --index_path_prefix /index/gpu_stitched \
+  --Rsmall 32 --Lsmall 100 --Rstitched 64 \
+  --C 96 --steps 64 --alpha 1.2 --num_threads 32
+```
+
+`Rsmall` and `Lsmall` control each label-local GPU Vamana build. `Rstitched` caps the global output graph. The builder writes the graph, full-vector data, numeric label file, label map, formatted labels, and label-to-medoid sidecars. With one label per vector and `Rsmall <= Rstitched`, it skips the redundant global prune.
 
 The release does not expose ablation variants. Search uses the ordinary DiskANN `search_memory_index` or `search_disk_index`.
 
