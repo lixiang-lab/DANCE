@@ -15,6 +15,8 @@ The paper uses the following systems as experimental baselines:
 - [Microsoft DiskANN](https://github.com/microsoft/DiskANN)
 - [Tagore](https://github.com/ZJU-DAILY/Tagore)
 - [Jasper](https://github.com/saltsystemslab/Jasper)
-- [RAPIDS cuVS](https://github.com/rapidsai/cuvs)
+- [NVIDIA cuVS](https://github.com/NVIDIA/cuvs)
 
 No source code from Tagore, Jasper, or cuVS is included. Each project remains governed by its upstream license and ownership terms.
+
+The exact revisions used by the experiments are recorded in [BASELINES.md](BASELINES.md).

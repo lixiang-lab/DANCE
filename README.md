@@ -84,6 +84,7 @@ Filtered search uses DiskANN's ordinary `search_memory_index` or `search_disk_in
 - [DiskANN integration and invocation](INTEGRATION.md)
 - [Dataset provenance and workload generation](DATASETS.md)
 - [Validated 1M/10M results and acceptance rules](REPRODUCIBILITY.md)
+- [Exact baseline versions](BASELINES.md)
 - [Third-party ownership and baseline repositories](THIRD_PARTY_NOTICES.md)
 
 ## Compared systems
@@ -93,7 +94,9 @@ The paper compares against or reports results from the following official reposi
 - [Microsoft DiskANN / CPU Vamana / FilteredVamana](https://github.com/microsoft/DiskANN)
 - [Tagore](https://github.com/ZJU-DAILY/Tagore)
 - [Jasper](https://github.com/saltsystemslab/Jasper)
-- [RAPIDS cuVS](https://github.com/rapidsai/cuvs)
+- [NVIDIA cuVS](https://github.com/NVIDIA/cuvs)
+
+Exact release tags, branches, and full commit identifiers are recorded in [BASELINES.md](BASELINES.md).
 
 ## License and ownership
 
