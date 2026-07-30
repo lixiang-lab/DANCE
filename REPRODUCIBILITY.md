@@ -29,7 +29,7 @@ R=64
 L=100
 C=80
 STEPS=64
-iterations=5
+iterations=4
 input=float32
 GPU storage=FP16
 distance accumulation=FP32
@@ -65,7 +65,7 @@ The fixed release path enables per-label search, union-label search, label-aware
 Parameters:
 
 ```text
-R=40
+R=64
 L=100
 FilteredL=100
 alpha=1.2

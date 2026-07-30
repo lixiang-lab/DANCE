@@ -74,7 +74,7 @@ build_filtered/apps/build_memory_index \
   --data_path /data/deep1M_base.fbin \
   --index_path_prefix /index/deep1m_filtered \
   --label_file /data/deep1m_labels.txt \
-  --max_degree 40 --Lbuild 100 --FilteredLbuild 100 \
+  --max_degree 64 --Lbuild 100 --FilteredLbuild 100 \
   --alpha 1.2 --num_threads 16 --gpu_filtered
 ```
 

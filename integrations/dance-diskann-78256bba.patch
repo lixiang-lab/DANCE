@@ -2498,7 +2498,7 @@ index cbca2644..0b75cb1d 100644
 +                target_compile_definitions(${DANCE_TARGET} PRIVATE
 +                    DANCE_PROFILE_NAME="FAST_SMALL"
 +                    ENABLE_FLOAT16_BUILD=1
-+                    VAMANA_ITERS=5
++                    VAMANA_ITERS=4
 +                    ENABLE_REVERSE_HEAVY_CAP=0
 +                    WARPS_PER_BLOCK=4
 +                )
