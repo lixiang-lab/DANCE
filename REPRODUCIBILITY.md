@@ -35,13 +35,11 @@ GPU storage=FP16
 distance accumulation=FP32
 ```
 
-Fresh clean-checkout validation on 2026-07-30:
+Clean-checkout DEEP1M validation on RTX 4090:
 
-| Dataset | GPU core construction | Command wall time | Invalid neighbors | Self-loops |
-|---|---:|---:|---:|---:|
-| DEEP1M | 2.768 s | 3.64 s | 0 | 0 |
-
-DEEP1M Recall@10:
+| GPU core construction | Command wall time | Invalid neighbors | Self-loops |
+|---:|---:|---:|---:|
+| 2.768 s | 3.64 s | 0 | 0 |
 
 | L | Recall@10 |
 |---:|---:|
@@ -65,6 +63,9 @@ Parameters:
 R=64
 L=100
 FilteredL=100
+per-label pool=100
+per-label output K_F=8
+union-label pool L_U=64
 alpha=1.2
 threads=16
 input=float32
@@ -74,35 +75,32 @@ initialization=deterministic random
 initial degree=16
 initialization seed=42
 label refinement rounds=3
+round scheduling=full task set in every round
+candidate aggregation=fixed-order first-come
+quota balancing=disabled
 label coverage repair=disabled
 ```
 
-Fresh clean-checkout validation on 2026-07-30:
+Clean-checkout DEEP1M-MultiLabel validation on RTX 4090 used 1,000,000
+vectors and 3,811,856 vertex-label tasks in every round:
 
-| Dataset | GPU construction | Indexing time | Command wall time | Invalid neighbors | Self-loops |
-|---|---:|---:|---:|---:|---:|
-| DEEP1M-FD12 | 5.774 s | 6.742 s | 7.47 s | 0 | 0 |
+| GPU construction | Indexing time | Command wall time | Invalid neighbors | Self-loops |
+|---:|---:|---:|---:|---:|
+| 23.823 s | 25.196 s | 25.99 s | 0 | 0 |
 
-The startup diagnostics reported `requested_R=64`, `internal_R=64`,
-`initial_degree=16`, `seed=42`, three canonical rounds, and
+| L | P50 Recall@10 | P1 Recall@10 |
+|---:|---:|---:|
+| 20 | 76.71 | 75.47 |
+| 40 | 87.12 | 86.58 |
+| 80 | 93.63 | 93.08 |
+| 160 | 97.49 | 96.95 |
+| 320 | 99.02 | 98.84 |
+| 650 | 99.71 | 99.60 |
+| 1000 | 99.80 | 99.78 |
+
+The build log reports `per_label_pool=100`, `per_label_keep=8`,
+`ordinary_pool=64`, three `kind=full` rounds, and
 `label_coverage_repair disabled=1`.
-
-DEEP1M-FD12 Recall@10:
-
-| L | Recall@10 |
-|---:|---:|
-| 10 | 86.37 |
-| 20 | 94.05 |
-| 40 | 98.23 |
-| 60 | 99.17 |
-| 80 | 99.50 |
-| 120 | 99.82 |
-| 160 | 99.90 |
-| 240 | 99.98 |
-| 320 | 99.98 |
-| 480 | 99.99 |
-| 650 | 100.00 |
-| 1000 | 100.00 |
 
 ## GPU-StitchedVamana release target
 

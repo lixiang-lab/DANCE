@@ -10,6 +10,6 @@
 | CPU memory search | Upstream DiskANN search | `search_memory_index` |
 | SSD search | Upstream DiskANN search | `search_disk_index` |
 
-The release contains neither competitor implementations nor paper-only experimental variants. It does not expose ablation controls. Label balancing is disabled because the final evaluation found no benefit. GPU-FilteredVamana covers overlapping-label construction; GPU-StitchedVamana covers disjoint or label-partitioned construction. Standard and filtered release gates are reported in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
+The release contains neither competitor implementations nor paper-only experimental variants. It does not expose ablation controls. Label balancing is disabled because the final evaluation found no benefit. GPU-FilteredVamana provides shared-graph overlapping-label construction. GPU-StitchedVamana supports both partitioned and overlapping-label construction through label-local graphs and stitching. Standard and filtered release gates are reported in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
 
 The DANCE source files and the patch in `integrations/` are the authoritative artifact. Apply the patch to the supported upstream DiskANN commit as described in [INTEGRATION.md](INTEGRATION.md).

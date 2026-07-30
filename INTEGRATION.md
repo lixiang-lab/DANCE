@@ -23,6 +23,12 @@ git apply /path/to/DANCE/integrations/dance-diskann-78256bba.patch
 
 The patch installs the DANCE sources, CMake targets, memory builders, GPU-FilteredVamana, GPU-StitchedVamana, shard builder, optional GPU merge, and DiskANN-compatible serialization.
 
+After applying the patch, verify that the standalone artifact sources and the integrated copies are identical:
+
+```bash
+/path/to/DANCE/tools/check_patch_sync.sh /path/to/patched/DiskANN
+```
+
 ## Build profiles
 
 ```bash
