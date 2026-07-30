@@ -17,9 +17,9 @@ This is intentionally a minimal repository. It contains:
 
 It does not contain experimental logs, generated results, figures, indexes, datasets, competitor source code, retired implementations, or ablation controls. It also does not mirror the Microsoft DiskANN repository.
 
-GPU-FilteredVamana uses the complete released path: per-label search, union-label search, label-aware pruning, coverage repair, and reverse-edge repair are enabled. Label balancing is disabled.
+GPU-FilteredVamana uses deterministic random initialization with initial degree 16 and seed 42. Per-label search, union-label search, label-aware pruning, and reverse-edge repair are enabled. The retained label coverage repair implementation and label balancing are disabled.
 
-GPU-StitchedVamana builds one GPU Vamana graph per filter label, remaps the local graphs to global identifiers, stitches their edges, writes label medoids and DiskANN sidecars, and applies the final global prune only when it is required. It is the released route for disjoint or label-partitioned workloads; GPU-FilteredVamana is the released route for overlapping-label workloads.
+GPU-StitchedVamana builds one GPU Vamana graph per filter label, remaps the local graphs to global identifiers, stitches their edges, writes label medoids and DiskANN sidecars, and applies the final global prune only when it is required. It supports both partitioned and overlapping-label workloads. GPU-FilteredVamana is the shared-graph alternative for overlapping-label workloads.
 
 ## Install into DiskANN
 
@@ -99,7 +99,7 @@ The executable emits a DiskANN-compatible graph and the label, label-map, label-
 - [Artifact contents and entry points](ARTIFACT.md)
 - [DiskANN integration and invocation](INTEGRATION.md)
 - [Dataset provenance and workload generation](DATASETS.md)
-- [Validated 1M/10M results and acceptance rules](REPRODUCIBILITY.md)
+- [Canonical parameters and acceptance rules](REPRODUCIBILITY.md)
 - [Exact baseline versions](BASELINES.md)
 - [Third-party ownership and baseline repositories](THIRD_PARTY_NOTICES.md)
 

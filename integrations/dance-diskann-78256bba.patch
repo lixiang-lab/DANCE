@@ -2432,7 +2432,7 @@ index b9bf4f38..609bde1c 100644
      // Indexing parameters
      uint32_t _indexingQueueSize;
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index cbca2644..0b75cb1d 100644
+index cbca2644..9f2cba1e 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -8,17 +8,202 @@ if(MSVC)
@@ -4778,10 +4778,10 @@ index 00000000..66defa65
 +}
 diff --git a/src/gpu_vamana_filtered.cu b/src/gpu_vamana_filtered.cu
 new file mode 100644
-index 00000000..4660c2b8
+index 00000000..3fdbf890
 --- /dev/null
 +++ b/src/gpu_vamana_filtered.cu
-@@ -0,0 +1,8914 @@
+@@ -0,0 +1,8947 @@
 +// Copyright (c) 2026 DANCE Authors. Licensed under the MIT License.
 +
 +
@@ -5495,6 +5495,36 @@ index 00000000..4660c2b8
 +    if (v == node)
 +        v = (v + 1u) % N;
 +    return v;
++}
++
++__global__ void filtered_deterministic_random_graph_kernel(uint32_t *graph, uint32_t *degrees,
++                                                           uint32_t N, uint32_t R,
++                                                           uint32_t initial_degree, uint32_t seed)
++{
++    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
++    if (row >= N)
++        return;
++    const uint32_t target = min(min(R, initial_degree), N > 0 ? N - 1 : 0);
++    const size_t base = (size_t)row * R;
++    uint32_t degree = 0;
++    uint32_t attempt = 0;
++    while (degree < target)
++    {
++        const uint32_t mixed = filtered_hash_u32(row * 0x9e3779b1u ^ seed * 0x85ebca6bu ^
++                                                  attempt * 0xc2b2ae35u);
++        const uint32_t candidate = mixed % N;
++        ++attempt;
++        if (candidate == row)
++            continue;
++        bool duplicate = false;
++        for (uint32_t i = 0; i < degree; ++i)
++            duplicate |= graph[base + i] == candidate;
++        if (!duplicate)
++            graph[base + degree++] = candidate;
++    }
++    for (uint32_t i = degree; i < R; ++i)
++        graph[base + i] = INVALID_ID;
++    degrees[row] = degree;
 +}
 +
 +template <typename DataT>
@@ -10578,7 +10608,7 @@ index 00000000..4660c2b8
 +    const bool enable_per_label_search = true;
 +    const bool enable_union_label_search = true;
 +    const bool enable_exact_reverse_repair = true;
-+    const bool enable_coverage_repair = true;
++    const bool enable_coverage_repair = false;
 +    const uint32_t reverse_reference_output = 0u;
 +    CUDA_CHECK_FILTERED(cudaMemcpyToSymbol(g_canonical_profile, &canonical_profile, sizeof(uint32_t)));
 +    printf("[gpu_vamana_filtered_navigation_policy] true_ordinary_round0=%u pure_ordinary_round0=%u "
@@ -11832,13 +11862,16 @@ index 00000000..4660c2b8
 +    else if (run_canonical_v2 && run_refine_vnew2 && canonical_device_handoff)
 +    {
 +        used_device_handoff = true;
-+        if constexpr (std::is_same<DataT, uint8_t>::value)
-+            ret = gpu_vamana_vnew2_build_device(h_data, num_points, dim, R, L, gpu_backbone_C, STEPS,
-+                                                 &d_handoff_data, &d_handoff_graph, &d_handoff_degree);
-+        else
-+            ret = gpu_vamana_vnew2_build_device_float(h_data, num_points, dim, R, L, gpu_backbone_C, STEPS,
-+                                                       &d_handoff_data, &d_handoff_graph, &d_handoff_degree);
-+        printf("[gpu_vamana_filtered] backbone_handoff=device_resident\n");
++        const uint32_t random_seed = 42;
++        const uint32_t random_degree = std::min(16u, R);
++        CUDA_CHECK_FILTERED(cudaMalloc(&d_handoff_graph, (size_t)num_points * R * sizeof(uint32_t)));
++        CUDA_CHECK_FILTERED(cudaMalloc(&d_handoff_degree, (size_t)num_points * sizeof(uint32_t)));
++        filtered_deterministic_random_graph_kernel<<<(num_points + 255) / 256, 256>>>(
++            d_handoff_graph, d_handoff_degree, num_points, R, random_degree, random_seed);
++        CUDA_CHECK_FILTERED(cudaGetLastError());
++        CUDA_CHECK_FILTERED(cudaDeviceSynchronize());
++        printf("[gpu_vamana_filtered] backbone_handoff=deterministic_random stride_R=%u initial_degree=%u seed=%u\n",
++               R, random_degree, random_seed);
 +    }
 +    else if constexpr (std::is_same<DataT, uint8_t>::value)
 +    {
