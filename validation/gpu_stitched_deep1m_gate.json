@@ -1,5 +1,7 @@
 {
-  "artifact_source_commit": "d3eedc02135da0bf03c21a7a2e9be95de4ffd262",
+  "construction_profile": "QUALITY",
+  "vector_precision": "FP32",
+  "distance_accumulation": "FP32",
   "dataset": "DEEP1M-MultiLabel",
   "platform": "NVIDIA GeForce RTX 4090",
   "cuda_toolkit": "13.1",
@@ -14,21 +16,21 @@
     "memberships": 3811856
   },
   "timing_seconds": {
-    "builder_total": 10.6538,
-    "command_wall": 10.83,
+    "builder_total": 12.1196,
+    "command_wall": 12.32,
     "figure_10_recorded_build": 12.53,
-    "final_global_prune": 1.71901
+    "final_global_prune": 1.82824
   },
   "recall_at_10_at_L20": {
-    "fresh_gate_P50": 75.91,
-    "fresh_gate_P1": 73.66,
+    "fresh_gate_P50": 76.19,
+    "fresh_gate_P1": 73.90,
     "figure_10_P50": 76.19,
     "figure_10_P1": 73.90
   },
   "graph": {
     "nodes": 1000000,
-    "edges": 45013848,
-    "average_degree": 45.013848,
+    "edges": 45016158,
+    "average_degree": 45.016158,
     "header_max_degree": 64,
     "invalid_ids": 0,
     "self_loops": 0,
