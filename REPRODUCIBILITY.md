@@ -55,7 +55,7 @@ Clean-checkout DEEP1M validation on RTX 4090:
 
 Profile: `FILTERED_PAPER`.
 
-The fixed release path starts from a deterministic random graph with initial degree 16 and seed 42. It enables per-label search, union-label search, label-aware pruning, and reverse-edge repair. The label coverage repair implementation remains in the source but is disabled, and label balancing is zero. No environment variable or CLI option selects an ablation.
+The fixed release path starts from a deterministic random graph with initial degree 16 and seed 42. It enables per-label search, union-label search, deterministic label-quota compaction, label-aware pruning, and exact CSR reverse-edge repair. All three refinement rounds process the complete vertex and vertex-label task sets. The active-frontier implementation remains available only through `DISKANN_GPU_FILTERED_ENABLE_ACTIVE_FRONTIER=1` and is disabled by default. Label coverage repair and the separate prune-shortlist balancing control remain disabled.
 
 Parameters:
 
@@ -63,7 +63,7 @@ Parameters:
 R=64
 L=100
 FilteredL=100
-per-label pool=100
+per-label pool=32
 per-label output K_F=8
 union-label pool L_U=64
 alpha=1.2
@@ -76,31 +76,32 @@ initial degree=16
 initialization seed=42
 label refinement rounds=3
 round scheduling=full task set in every round
-candidate aggregation=fixed-order first-come
-quota balancing=disabled
+candidate aggregation=fixed-order materialization, then label-quota compaction
+label quota=max(K_F, ceil(R / number of row labels))
+exact CSR reverse repair=enabled
+active frontier=disabled
+prune-shortlist balancing=disabled
 label coverage repair=disabled
 ```
 
-Clean-checkout DEEP1M-MultiLabel validation on RTX 4090 used 1,000,000
-vectors and 3,811,856 vertex-label tasks in every round:
+Clean-checkout DEEP1M-MultiLabel validation on RTX 4090 reported
+`per_label_pool=32`, `per_label_keep=8`, `ordinary_pool=64`,
+`active_frontier=0`, `label_quota=1`, `exact_csr_reverse=1`, three
+`kind=full` rounds, and `label_coverage_repair disabled=1`.
 
 | GPU construction | Indexing time | Command wall time | Invalid neighbors | Self-loops |
 |---:|---:|---:|---:|---:|
-| 23.823 s | 25.196 s | 25.99 s | 0 | 0 |
+| 12.073 s | 13.355 s | 14.14 s | 0 | 0 |
 
 | L | P50 Recall@10 | P1 Recall@10 |
 |---:|---:|---:|
-| 20 | 76.71 | 75.47 |
-| 40 | 87.12 | 86.58 |
-| 80 | 93.63 | 93.08 |
-| 160 | 97.49 | 96.95 |
-| 320 | 99.02 | 98.84 |
-| 650 | 99.71 | 99.60 |
-| 1000 | 99.80 | 99.78 |
-
-The build log reports `per_label_pool=100`, `per_label_keep=8`,
-`ordinary_pool=64`, three `kind=full` rounds, and
-`label_coverage_repair disabled=1`.
+| 20 | 75.85 | 69.52 |
+| 40 | 86.41 | 80.96 |
+| 80 | 93.50 | 88.96 |
+| 160 | 97.47 | 94.78 |
+| 320 | 99.14 | 97.68 |
+| 650 | 99.73 | 99.28 |
+| 1000 | 99.90 | 99.61 |
 
 ## GPU-StitchedVamana release target
 

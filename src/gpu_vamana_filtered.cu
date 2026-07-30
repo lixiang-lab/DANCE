@@ -4715,6 +4715,8 @@ __global__ void canonical_merge_candidates(uint32_t N, uint32_t R, uint32_t C, u
 {
     __shared__ uint32_t ordinary_ids_cache[64];
     __shared__ float ordinary_distance_cache[64];
+    __shared__ uint32_t bridge_ids[16];
+    __shared__ float bridge_distances[16];
     const uint32_t lane = threadIdx.x & 31u;
     if (blockIdx.x >= row_count)
         return;
@@ -4776,9 +4778,64 @@ __global__ void canonical_merge_candidates(uint32_t N, uint32_t R, uint32_t C, u
         canonical_merge_one_warp(ordinary_ids_cache[i], ordinary_distance_cache[i], row, N, C,
             row_work, row_distances, count, lane);
 
-
-
-
+    if (lane == 0 && label_point_offsets && offsets[row + 1] > offsets[row] &&
+        offsets[row + 1] - offsets[row] <= 16)
+    {
+        uint32_t assigned[16] = {};
+        const uint32_t label_count = offsets[row + 1] - offsets[row];
+        uint32_t quota = (R + label_count - 1) / label_count;
+        if (quota < per_label_keep)
+            quota = per_label_keep;
+        uint32_t bridge_count = 0;
+        if (preserve_unrestricted)
+        {
+            const uint32_t bridge_limit = min(bridge_reserve, 16u);
+            for (uint32_t i = 0; i < count && bridge_count < bridge_limit; ++i)
+                if (!has_common_label_device(row, row_work[i], offsets, labels,
+                                             UINT32_MAX, nullptr, nullptr))
+                {
+                    bridge_ids[bridge_count] = row_work[i];
+                    bridge_distances[bridge_count] = row_distances[i];
+                    ++bridge_count;
+                }
+        }
+        uint32_t balanced = 0;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const uint32_t candidate = row_work[i];
+            uint32_t best_q = UINT32_MAX, best_cardinality = UINT32_MAX;
+            for (uint32_t q = 0; q < label_count; ++q)
+            {
+                const uint32_t label = labels[offsets[row] + q];
+                if (assigned[q] >= quota ||
+                    !point_has_exact_label_device(candidate, label, offsets, labels))
+                    continue;
+                const uint32_t cardinality = label_point_offsets[label + 1] - label_point_offsets[label];
+                if (best_q == UINT32_MAX || cardinality < best_cardinality ||
+                    (cardinality == best_cardinality && label < labels[offsets[row] + best_q]))
+                {
+                    best_q = q;
+                    best_cardinality = cardinality;
+                }
+            }
+            if (best_q == UINT32_MAX)
+                continue;
+            if (balanced != i)
+            {
+                row_work[balanced] = candidate;
+                row_distances[balanced] = row_distances[i];
+            }
+            ++assigned[best_q];
+            ++balanced;
+        }
+        for (uint32_t i = 0; i < bridge_count && balanced < C; ++i)
+        {
+            row_work[balanced] = bridge_ids[i];
+            row_distances[balanced] = bridge_distances[i];
+            ++balanced;
+        }
+        count = balanced;
+    }
     count = __shfl_sync(0xffffffffu, count, 0);
     if (lane == 0)
         work_degrees[row] = count;
@@ -5621,7 +5678,7 @@ static int canonical_round0_from_host_backbone_typed(const HostT *h_data, uint32
 
 
 
-    const uint32_t per_label_pool = filtered_L;
+    const uint32_t per_label_pool = std::min(filtered_L, 32u);
     const uint32_t per_label_keep = std::min(per_label_pool, 8u);
     const uint32_t ordinary_keep = std::min(R, search_L);
 
@@ -5641,6 +5698,8 @@ static int canonical_round0_from_host_backbone_typed(const HostT *h_data, uint32
         "DISKANN_GPU_FILTERED_ADDITIONAL_ROUND0_ANCHOR", 0, 0, 1);
     const uint32_t bridge_reserve = env_u32_clamped(
         "DISKANN_GPU_FILTERED_BRIDGE_WORK_RESERVE", 8, 0, 16);
+    const uint32_t tau_F = env_u32_clamped(
+        "DISKANN_GPU_FILTERED_CANONICAL_TAU_F", 8, 1, R);
     const uint32_t coverage_quota = 1;
 
 
@@ -5657,15 +5716,18 @@ static int canonical_round0_from_host_backbone_typed(const HostT *h_data, uint32
     const bool enable_union_label_search = true;
     const bool enable_exact_reverse_repair = true;
     const bool enable_coverage_repair = false;
+    const char *active_frontier_env = getenv("DISKANN_GPU_FILTERED_ENABLE_ACTIVE_FRONTIER");
+    const bool enable_active_frontier = active_frontier_env && atoi(active_frontier_env) != 0;
     const uint32_t reverse_reference_output = 0u;
     CUDA_CHECK_FILTERED(cudaMemcpyToSymbol(g_canonical_profile, &canonical_profile, sizeof(uint32_t)));
     printf("[gpu_vamana_filtered_navigation_policy] per_label_pool=%u per_label_keep=%u "
            "true_ordinary_round0=%u pure_ordinary_round0=%u ordinary_pool=%u ordinary_steps=%u "
            "posting_anchor=%u additional_round0_anchor=%u "
-           "bridge_work_reserve=%u\n",
+           "bridge_work_reserve=%u active_frontier=%u label_quota=1 exact_csr_reverse=1\n",
            per_label_pool, per_label_keep, true_ordinary_round0, pure_ordinary_round0,
            ordinary_pool, true_ordinary_steps,
-           retain_posting_anchor, additional_round0_anchor, bridge_reserve);
+           retain_posting_anchor, additional_round0_anchor, bridge_reserve,
+           enable_active_frontier ? 1u : 0u);
     SearchT *d_data = nullptr;
     HostT *d_source_data = d_handoff_data;
     uint32_t *d_offsets = nullptr, *d_labels = nullptr, *d_starts = nullptr, *d_task_rows = nullptr, *d_label_sizes = nullptr;
@@ -5827,11 +5889,24 @@ static int canonical_round0_from_host_backbone_typed(const HostT *h_data, uint32
     const unsigned long long zero_distance_counts[6] = {};
     CUDA_CHECK_FILTERED(cudaMemcpyToSymbol(g_canonical_distance_counts, zero_distance_counts,
                                             sizeof(zero_distance_counts)));
-    for (uint32_t round = 0; round < configured_rounds; ++round)
+    for (uint32_t round = 0; round < configured_rounds && active_count > 0; ++round)
     {
-        const uint32_t *round_ids = nullptr;
+        const uint32_t *round_ids =
+            (enable_active_frontier && round > 0) ? d_active_ids : nullptr;
         uint32_t active_task_count = total_labels;
         const uint32_t *active_task_positions = nullptr;
+        if (enable_active_frontier && round > 0)
+        {
+            canonical_mark_task_flags<<<(total_labels + 255) / 256, 256>>>(
+                total_labels, d_task_rows, d_active, d_task_flags);
+            CUDA_CHECK_FILTERED(cub::DeviceSelect::Flagged(
+                d_select_temp, select_temp_bytes, d_all_task_ids, d_task_flags,
+                d_active_task_ids, d_selected_count, total_labels));
+            CUDA_CHECK_FILTERED(cudaMemcpy(
+                &active_task_count, d_selected_count, sizeof(uint32_t),
+                cudaMemcpyDeviceToHost));
+            active_task_positions = d_active_task_ids;
+        }
         const float round_alpha = alpha;
         double stage = now_sec_filtered();
         if (enable_per_label_search && fused_label_threshold)
@@ -6192,16 +6267,37 @@ static int canonical_round0_from_host_backbone_typed(const HostT *h_data, uint32
             cudaFree(d_parity_touched); cudaFree(d_parity_counters);
         }
 
-        uint32_t changed_count = 0;
+        uint32_t changed_count = 0, deficient_count = 0, next_active_count = N;
         CUDA_CHECK_FILTERED(cub::DeviceSelect::Flagged(d_select_temp, select_temp_bytes, d_all_ids, d_changed,
                                                         d_changed_ids, d_selected_count, N));
         CUDA_CHECK_FILTERED(cudaMemcpy(&changed_count, d_selected_count, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-        printf("[gpu_vamana_filtered_canonical_round] round=%u kind=full alpha=%.3f active=%u tasks=%u changed=%u touched=%u reverse_proposals=%u\n",
-               round, round_alpha, active_count, active_task_count, changed_count, touched_count,
-               round_reverse_proposals);
+        if (enable_active_frontier)
+        {
+            canonical_mark_deficient<<<(N + 255) / 256, 256>>>(
+                N, R, tau_F, d_graph_b, d_degree_b, d_offsets, d_labels,
+                d_label_sizes, num_labels, universal_label, d_deficient);
+            canonical_combine_frontier<<<(N + 255) / 256, 256>>>(
+                N, d_changed, d_touched, d_deficient, d_active);
+            CUDA_CHECK_FILTERED(cub::DeviceSelect::Flagged(
+                d_select_temp, select_temp_bytes, d_all_ids, d_deficient,
+                d_deficient_ids, d_selected_count, N));
+            CUDA_CHECK_FILTERED(cudaMemcpy(
+                &deficient_count, d_selected_count, sizeof(uint32_t),
+                cudaMemcpyDeviceToHost));
+            CUDA_CHECK_FILTERED(cub::DeviceSelect::Flagged(
+                d_select_temp, select_temp_bytes, d_all_ids, d_active,
+                d_active_ids, d_selected_count, N));
+            CUDA_CHECK_FILTERED(cudaMemcpy(
+                &next_active_count, d_selected_count, sizeof(uint32_t),
+                cudaMemcpyDeviceToHost));
+        }
+        printf("[gpu_vamana_filtered_canonical_round] round=%u kind=%s alpha=%.3f active=%u tasks=%u changed=%u touched=%u reverse_proposals=%u deficient=%u next_active=%u\n",
+               round, (enable_active_frontier && round > 0) ? "frontier" : "full",
+               round_alpha, active_count, active_task_count, changed_count, touched_count,
+               round_reverse_proposals, deficient_count, next_active_count);
         std::swap(d_graph_a, d_graph_b);
         std::swap(d_degree_a, d_degree_b);
-        active_count = N;
+        active_count = enable_active_frontier ? next_active_count : N;
     }
 
 

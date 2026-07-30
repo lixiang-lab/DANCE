@@ -17,7 +17,7 @@ This is intentionally a minimal repository. It contains:
 
 It does not contain experimental logs, generated results, figures, indexes, datasets, competitor source code, retired implementations, or ablation controls. It also does not mirror the Microsoft DiskANN repository.
 
-GPU-FilteredVamana uses deterministic random initialization with initial degree 16 and seed 42. All vertex-label and union-label tasks run in each of the three refinement rounds. Candidate aggregation is fixed-order first-come with no quota balancing. Per-label search, union-label search, label-aware pruning, and reverse-edge repair are enabled. The retained label coverage repair implementation and label balancing are disabled.
+GPU-FilteredVamana uses deterministic random initialization with initial degree 16 and seed 42. All vertices, vertex-label tasks, and union-label tasks run in each of the three synchronous refinement rounds. Each vertex-label search uses a 32-entry pool and retains eight outputs; union-label search uses a 64-entry pool. Fixed-order materialization is followed by deterministic label-quota compaction, FilteredRobustPrune, and exact CSR reverse-edge repair. The active-frontier implementation is retained as an explicit opt-in path but is disabled by default. Label coverage repair and the separate prune-shortlist balancing control are also disabled by default.
 
 GPU-StitchedVamana builds one GPU Vamana graph per filter label, remaps the local graphs to global identifiers, stitches their edges, writes label medoids and DiskANN sidecars, and applies the final global prune only when it is required. It supports both partitioned and overlapping-label workloads. GPU-FilteredVamana is the shared-graph alternative for overlapping-label workloads.
 
