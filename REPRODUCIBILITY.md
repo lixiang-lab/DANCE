@@ -107,6 +107,86 @@ Clean-checkout DEEP1M-MultiLabel validation on RTX 4090 reported
 
 The release includes and compiles `gpu_stitched_vamana_index` under the `FILTERED_PAPER` profile. Its fixed path performs label-local GPU Vamana construction, global-ID remapping, edge stitching, sidecar generation, and conditional global pruning. It shares the same FP16 GPU vector representation and FP32 distance accumulation as the filtered profile.
 
+### DEEP1M-MultiLabel release gate
+
+The lightweight GPU-StitchedVamana gate uses the same overlapping 47-label
+DEEP1M workload and parameters as Figure 10:
+
+```text
+Rsmall=32
+Lsmall=100
+Rstitched=64
+C=96
+steps=64
+alpha=1.2
+```
+
+Build the index:
+
+```bash
+/usr/bin/time -f 'wall_seconds=%e\nmax_rss_kb=%M' -o gate/build.time \
+  build_filtered/apps/utils/gpu_stitched_vamana_index \
+  --data_type float \
+  --data_path /data/deep1M_base.fbin \
+  --label_file /data/deep1M_multilabel/labels.txt \
+  --index_path_prefix gate/index \
+  --Rsmall 32 --Lsmall 100 --Rstitched 64 \
+  --C 96 --steps 64 --alpha 1.2 --num_threads 32 \
+  > gate/build.log 2>&1
+
+Check the graph, overlap semantics, label medoids, all search sidecars, and the
+global-prune decision:
+
+```bash
+python3 tools/validate_gpu_stitched_gate.py \
+  --index-prefix gate/index \
+  --build-log gate/build.log \
+  --expected-nodes 1000000 \
+  --expected-labels 47 \
+  --max-degree 64 \
+  --output gate/validation.json
+```
+
+Search P50 and P1 with the ordinary DiskANN memory-search executable:
+
+```bash
+for bucket in P50 P1; do
+  build_filtered/apps/search_memory_index \
+    --data_type float --dist_fn l2 \
+    --index_path_prefix gate/index \
+    --result_path gate/${bucket}_result \
+    --query_file /data/deep1M_multilabel/${bucket}_queries.fbin \
+    --query_filters_file /data/deep1M_multilabel/${bucket}_query_filters.txt \
+    --gt_file /data/deep1M_multilabel/${bucket}_groundtruth.bin \
+    --recall_at 10 --search_list 20 --num_threads 16
+done
+```
+
+A clean release build on RTX 4090 produced:
+
+| Check | Fresh release gate | Figure 10 retained result |
+|---|---:|---:|
+| Builder total | 10.654 s | 12.53 s |
+| Full command wall time | 10.83 s | — |
+| P50 Recall@10, L=20 | 75.91% | 76.19% |
+| P1 Recall@10, L=20 | 73.66% | 73.90% |
+
+The small timing and recall differences are normal GPU scheduling and
+parallel insertion-order variation. The fresh result differs from the retained
+Figure 10 graph by at most 0.28 recall percentage points.
+
+The gate processed all 3,811,856 memberships across 47 overlapping labels.
+The final graph has 1,000,000 nodes, maximum degree 64, and zero invalid IDs,
+self-loops, duplicate edges, degree overflows, or label-incompatible edges.
+All vector, label, formatted-label, label-map, and label-to-medoid sidecars
+exist; both label tables contain one million rows; all 47 label-map and medoid
+entries agree; and every medoid carries its assigned label.
+
+Global pruning is required for this overlapping workload. The stitched union
+has maximum degree 178, so the builder executes the global label-aware prune
+for 1.719 s and emits a degree-64 graph. The machine-readable retained gate is
+[`validation/gpu_stitched_deep1m_gate.json`](validation/gpu_stitched_deep1m_gate.json).
+
 ## Acceptance rules
 
 A release is accepted only if:
