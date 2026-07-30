@@ -133,6 +133,7 @@ Build the index:
   --Rsmall 32 --Lsmall 100 --Rstitched 64 \
   --C 96 --steps 64 --alpha 1.2 --num_threads 32 \
   > gate/build.log 2>&1
+```
 
 Check the graph, overlap semantics, label medoids, all search sidecars, and the
 global-prune decision:
