@@ -2,7 +2,7 @@
 
 This is the artifact for:
 
-> **DANCE: GPU-Native Disk-Based Graph Index Construction for Billion-Scale Approximate Nearest Neighbor Search**
+> **DANCE: GPU Construction of Standard and Filtered DiskANN Indexes for Large-Scale Vector Search**
 
 The manuscript is being prepared for submission to **PVLDB / VLDB 2027**. This repository contains the latest standard DANCE Vamana, GPU-FilteredVamana, and GPU-StitchedVamana implementations used by the paper.
 
@@ -12,7 +12,6 @@ This is intentionally a minimal repository. It contains:
 
 - DANCE-authored CUDA and C++ source files;
 - a patch for integrating DANCE into a fixed Microsoft DiskANN revision;
-- a deterministic filtered-workload generator;
 - build, invocation, dataset, and validation documentation.
 
 It does not contain experimental logs, generated results, figures, indexes, datasets, competitor source code, retired implementations, or ablation controls. It also does not mirror the Microsoft DiskANN repository.

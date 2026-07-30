@@ -1,6 +1,6 @@
 # Artifact scope
 
-Immutable release: `artifact-v1.0.6`.
+Immutable release: `artifact-v1.0.7`.
 
 | Paper capability | Released implementation | Entry point |
 |---|---|---|

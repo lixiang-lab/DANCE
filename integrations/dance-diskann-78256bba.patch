@@ -483,7 +483,7 @@ index 60e38c1b..d87a107f 100644
      std::chrono::duration<double> index_time = std::chrono::high_resolution_clock::now() - index_timer;
      std::cout << "pruned/stitched graph generated in " << index_time.count() << " seconds" << std::endl;
 diff --git a/apps/utils/CMakeLists.txt b/apps/utils/CMakeLists.txt
-index 3b8cf223..59529e8f 100644
+index 3b8cf223..375082ea 100644
 --- a/apps/utils/CMakeLists.txt
 +++ b/apps/utils/CMakeLists.txt
 @@ -59,7 +59,6 @@ target_link_libraries(compute_groundtruth_for_filters ${PROJECT_NAME} ${DISKANN_
@@ -494,7 +494,7 @@ index 3b8cf223..59529e8f 100644
  add_executable(partition_data partition_data.cpp)
  target_link_libraries(partition_data ${PROJECT_NAME} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS})
  
-@@ -78,6 +77,22 @@ target_link_libraries(generate_synthetic_labels ${PROJECT_NAME} Boost::program_o
+@@ -78,6 +77,18 @@ target_link_libraries(generate_synthetic_labels ${PROJECT_NAME} Boost::program_o
  add_executable(stats_label_data stats_label_data.cpp)
  target_link_libraries(stats_label_data ${PROJECT_NAME} Boost::program_options)
  
@@ -503,21 +503,17 @@ index 3b8cf223..59529e8f 100644
 +    add_executable(gpu_stitched_vamana_index gpu_stitched_vamana_index.cpp)
 +    target_link_libraries(gpu_stitched_vamana_index ${PROJECT_NAME} Boost::program_options)
 +
-+    add_executable(gpu_shard_microbench gpu_shard_microbench.cpp)
-+    target_link_libraries(gpu_shard_microbench ${PROJECT_NAME})
-+
-+    add_executable(gpu_vamana_memory_index gpu_shard_microbench.cpp)
++    add_executable(gpu_vamana_memory_index gpu_vamana_memory_index.cpp)
 +    target_link_libraries(gpu_vamana_memory_index ${PROJECT_NAME})
 +    list(APPEND DISKANN_GPU_UTILITY_TARGETS
 +         gpu_stitched_vamana_index
-+         gpu_shard_microbench
 +         gpu_vamana_memory_index)
 +endif()
 +
  if (NOT MSVC)
      include(GNUInstallDirs)
      install(TARGETS fvecs_to_bin
-@@ -105,6 +120,7 @@ if (NOT MSVC)
+@@ -105,6 +116,7 @@ if (NOT MSVC)
              create_disk_layout
              generate_synthetic_labels
              stats_label_data
@@ -540,462 +536,6 @@ index a881b110..50540e0f 100644
  
      delete[] train_data;
  
-diff --git a/apps/utils/gpu_shard_microbench.cpp b/apps/utils/gpu_shard_microbench.cpp
-new file mode 100644
-index 00000000..3bc6cc33
---- /dev/null
-+++ b/apps/utils/gpu_shard_microbench.cpp
-@@ -0,0 +1,450 @@
-+// Copyright (c) 2026 DANCE Authors. Licensed under the MIT License.
-+#include "gpu_vamana_builder.h"
-+
-+#include <chrono>
-+#include <cstdio>
-+#include <cstdint>
-+#include <fstream>
-+#include <iostream>
-+#include <stdexcept>
-+#include <string>
-+#include <algorithm>
-+#include <limits>
-+#include <type_traits>
-+#include <vector>
-+
-+namespace
-+{
-+double now_sec()
-+{
-+    using clock = std::chrono::high_resolution_clock;
-+    static const auto t0 = clock::now();
-+    return std::chrono::duration<double>(clock::now() - t0).count();
-+}
-+
-+std::string json_escape(const std::string &value)
-+{
-+    std::string escaped;
-+    escaped.reserve(value.size());
-+    for (const unsigned char ch : value)
-+    {
-+        switch (ch)
-+        {
-+        case '"':
-+            escaped += "\\\"";
-+            break;
-+        case '\\':
-+            escaped += "\\\\";
-+            break;
-+        case '\b':
-+            escaped += "\\b";
-+            break;
-+        case '\f':
-+            escaped += "\\f";
-+            break;
-+        case '\n':
-+            escaped += "\\n";
-+            break;
-+        case '\r':
-+            escaped += "\\r";
-+            break;
-+        case '\t':
-+            escaped += "\\t";
-+            break;
-+        default:
-+            if (ch < 0x20)
-+                throw std::runtime_error("control character in JSON path");
-+            escaped.push_back(static_cast<char>(ch));
-+        }
-+    }
-+    return escaped;
-+}
-+
-+struct Args
-+{
-+    std::string data_path;
-+    std::string data_type = "uint8";
-+    std::string index_prefix;
-+    uint64_t offset = 0;
-+    uint32_t npts = 0;
-+    uint32_t R = 42;
-+    uint32_t L = 100;
-+    uint32_t C = 80;
-+    uint32_t STEPS = 64;
-+    std::string builder = "vnew2";
-+};
-+
-+uint64_t parse_uint64(const std::string &text, const std::string &option)
-+{
-+    if (text.empty() || !std::all_of(text.begin(), text.end(), [](unsigned char ch) { return ch >= '0' && ch <= '9'; }))
-+        throw std::runtime_error(option + " must be an unsigned integer");
-+    size_t consumed = 0;
-+    unsigned long long value = 0;
-+    try
-+    {
-+        value = std::stoull(text, &consumed, 10);
-+    }
-+    catch (const std::exception &)
-+    {
-+        throw std::runtime_error(option + " must be an unsigned integer");
-+    }
-+    if (consumed != text.size())
-+        throw std::runtime_error(option + " must be an unsigned integer");
-+    return static_cast<uint64_t>(value);
-+}
-+
-+uint32_t parse_uint32(const std::string &text, const std::string &option, bool allow_zero)
-+{
-+    const uint64_t value = parse_uint64(text, option);
-+    if (value > std::numeric_limits<uint32_t>::max() || (!allow_zero && value == 0))
-+        throw std::runtime_error(option + (allow_zero ? " is out of uint32 range" : " must be in [1, UINT32_MAX]"));
-+    return static_cast<uint32_t>(value);
-+}
-+
-+void usage(const char *argv0)
-+{
-+    std::cerr << "Usage: " << argv0
-+              << " --data_path <bin> [--data_type uint8|float] [--offset N] [--npts N|0=all]"
-+              << " [--index_prefix PATH]"
-+              << " [--R 42] [--L 100] [--C 80] [--STEPS 64] [--builder vnew2|v8]\n";
-+}
-+
-+Args parse_args(int argc, char **argv)
-+{
-+    Args args;
-+    for (int i = 1; i < argc; i++)
-+    {
-+        std::string key = argv[i];
-+        auto need_value = [&]() -> std::string {
-+            if (i + 1 >= argc)
-+                throw std::runtime_error("missing value for " + key);
-+            return argv[++i];
-+        };
-+        if (key == "--data_path")
-+            args.data_path = need_value();
-+        else if (key == "--data_type")
-+            args.data_type = need_value();
-+        else if (key == "--index_prefix")
-+            args.index_prefix = need_value();
-+        else if (key == "--offset")
-+            args.offset = parse_uint64(need_value(), key);
-+        else if (key == "--npts")
-+            args.npts = parse_uint32(need_value(), key, true);
-+        else if (key == "--R")
-+            args.R = parse_uint32(need_value(), key, false);
-+        else if (key == "--L")
-+            args.L = parse_uint32(need_value(), key, false);
-+        else if (key == "--C")
-+            args.C = parse_uint32(need_value(), key, false);
-+        else if (key == "--STEPS")
-+            args.STEPS = parse_uint32(need_value(), key, false);
-+        else if (key == "--builder")
-+            args.builder = need_value();
-+        else
-+            throw std::runtime_error("unknown argument: " + key);
-+    }
-+    if (args.data_path.empty())
-+        throw std::runtime_error("--data_path is required");
-+    if (args.data_type != "uint8" && args.data_type != "float")
-+        throw std::runtime_error("--data_type must be uint8 or float");
-+    if (args.builder != "vnew2" && args.builder != "v8")
-+        throw std::runtime_error("--builder must be vnew2 or v8");
-+    (void)json_escape(args.data_path);
-+    (void)json_escape(args.index_prefix);
-+    return args;
-+}
-+
-+template <typename T>
-+std::vector<T> load_slice(const Args &args, uint32_t &dim, uint64_t &base_npts, uint32_t &loaded_npts)
-+{
-+    std::ifstream reader(args.data_path, std::ios::binary);
-+    if (!reader)
-+        throw std::runtime_error("failed to open " + args.data_path);
-+
-+    uint32_t npts32 = 0;
-+    uint32_t dim32 = 0;
-+    reader.read(reinterpret_cast<char *>(&npts32), sizeof(uint32_t));
-+    reader.read(reinterpret_cast<char *>(&dim32), sizeof(uint32_t));
-+    if (!reader)
-+        throw std::runtime_error("failed to read DiskANN matrix header");
-+    base_npts = npts32;
-+    dim = dim32;
-+    const uint64_t element_bytes = sizeof(T);
-+    if (dim == 0 || base_npts > (std::numeric_limits<uint64_t>::max() - 8) / ((uint64_t)dim * element_bytes))
-+        throw std::runtime_error("DiskANN matrix shape overflows its byte-size calculation");
-+    const uint64_t expected_bytes = 8 + base_npts * (uint64_t)dim * element_bytes;
-+    reader.seekg(0, std::ios::end);
-+    const std::streamoff actual_bytes = reader.tellg();
-+    if (actual_bytes < 0 || static_cast<uint64_t>(actual_bytes) != expected_bytes)
-+        throw std::runtime_error("DiskANN matrix header does not match exact file size");
-+    const uint64_t remaining = base_npts - std::min<uint64_t>(args.offset, base_npts);
-+    const uint64_t requested = args.npts == 0 ? remaining : args.npts;
-+    if (args.offset > base_npts || requested > remaining || requested > std::numeric_limits<uint32_t>::max())
-+        throw std::runtime_error("requested slice exceeds base file point count");
-+    if (requested == 0 || dim == 0)
-+        throw std::runtime_error("requested slice and dimension must be nonzero");
-+    loaded_npts = static_cast<uint32_t>(requested);
-+
-+    std::vector<T> data((size_t)loaded_npts * dim);
-+    const uint64_t byte_offset = 2 * sizeof(uint32_t) + args.offset * (uint64_t)dim * sizeof(T);
-+    reader.seekg((std::streamoff)byte_offset, std::ios::beg);
-+    reader.read(reinterpret_cast<char *>(data.data()), (std::streamsize)(data.size() * sizeof(T)));
-+    if (!reader)
-+        throw std::runtime_error("failed to read requested slice");
-+    return data;
-+}
-+
-+template <typename T>
-+void save_memory_index(const Args &args, const std::vector<T> &data, uint32_t npts, uint32_t dim,
-+                       const std::vector<uint32_t> &graph, const std::vector<uint32_t> &degree, uint32_t medoid)
-+{
-+    if (args.index_prefix.empty())
-+        return;
-+    const std::string data_path = args.index_prefix + ".data";
-+    const std::string graph_temp = args.index_prefix + ".tmp";
-+    const std::string data_temp = data_path + ".tmp";
-+    if (std::ifstream(args.index_prefix, std::ios::binary) || std::ifstream(data_path, std::ios::binary) ||
-+        std::ifstream(graph_temp, std::ios::binary) || std::ifstream(data_temp, std::ios::binary))
-+        throw std::runtime_error("refusing to overwrite existing memory-index output");
-+    const size_t edge_count = [&]() {
-+        size_t total = 0;
-+        for (uint32_t value : degree)
-+            total += std::min(value, args.R);
-+        return total;
-+    }();
-+    const uint32_t max_degree = *std::max_element(degree.begin(), degree.end());
-+    const size_t frozen_points = 0;
-+    const size_t header_bytes = sizeof(size_t) + 2 * sizeof(uint32_t) + sizeof(size_t);
-+    if ((size_t)npts > (std::numeric_limits<size_t>::max() - header_bytes) / sizeof(uint32_t) ||
-+        edge_count > (std::numeric_limits<size_t>::max() - header_bytes -
-+                      (size_t)npts * sizeof(uint32_t)) / sizeof(uint32_t))
-+        throw std::runtime_error("serialized graph size overflows size_t");
-+    const size_t graph_bytes =
-+        header_bytes + (size_t)npts * sizeof(uint32_t) + edge_count * sizeof(uint32_t);
-+    const size_t data_bytes = 2 * sizeof(uint32_t) + data.size() * sizeof(T);
-+    try
-+    {
-+        std::ofstream writer(graph_temp, std::ios::binary | std::ios::trunc);
-+        if (!writer)
-+            throw std::runtime_error("failed to create graph temporary output " + graph_temp);
-+        writer.write(reinterpret_cast<const char *>(&graph_bytes), sizeof(graph_bytes));
-+        writer.write(reinterpret_cast<const char *>(&max_degree), sizeof(max_degree));
-+        writer.write(reinterpret_cast<const char *>(&medoid), sizeof(medoid));
-+        writer.write(reinterpret_cast<const char *>(&frozen_points), sizeof(frozen_points));
-+        for (uint32_t node = 0; node < npts; ++node)
-+        {
-+            const uint32_t row_degree = std::min(degree[node], args.R);
-+            writer.write(reinterpret_cast<const char *>(&row_degree), sizeof(row_degree));
-+            writer.write(reinterpret_cast<const char *>(graph.data() + (size_t)node * args.R),
-+                         (size_t)row_degree * sizeof(uint32_t));
-+        }
-+        if (!writer)
-+            throw std::runtime_error("failed while writing graph temporary output " + graph_temp);
-+        writer.close();
-+        if (!writer)
-+            throw std::runtime_error("failed while closing graph temporary output " + graph_temp);
-+    }
-+    catch (...)
-+    {
-+        std::remove(graph_temp.c_str());
-+        throw;
-+    }
-+    try
-+    {
-+        std::ofstream writer(data_temp, std::ios::binary | std::ios::trunc);
-+        if (!writer)
-+            throw std::runtime_error("failed to create vector temporary output " + data_temp);
-+        writer.write(reinterpret_cast<const char *>(&npts), sizeof(npts));
-+        writer.write(reinterpret_cast<const char *>(&dim), sizeof(dim));
-+        writer.write(reinterpret_cast<const char *>(data.data()), (std::streamsize)(data.size() * sizeof(T)));
-+        if (!writer)
-+            throw std::runtime_error("failed while writing vector temporary output " + data_temp);
-+        writer.close();
-+        if (!writer)
-+            throw std::runtime_error("failed while closing vector temporary output " + data_temp);
-+    }
-+    catch (...)
-+    {
-+        std::remove(graph_temp.c_str());
-+        std::remove(data_temp.c_str());
-+        throw;
-+    }
-+    std::ifstream graph_reader(graph_temp, std::ios::binary | std::ios::ate);
-+    std::ifstream data_reader(data_temp, std::ios::binary | std::ios::ate);
-+    if (!graph_reader || graph_reader.tellg() != static_cast<std::streamoff>(graph_bytes) ||
-+        !data_reader || data_reader.tellg() != static_cast<std::streamoff>(data_bytes))
-+    {
-+        graph_reader.close();
-+        data_reader.close();
-+        std::remove(graph_temp.c_str());
-+        std::remove(data_temp.c_str());
-+        throw std::runtime_error("serialized temporary output size does not match its DiskANN layout");
-+    }
-+    graph_reader.close();
-+    data_reader.close();
-+    if (std::rename(data_temp.c_str(), data_path.c_str()) != 0)
-+    {
-+        std::remove(graph_temp.c_str());
-+        std::remove(data_temp.c_str());
-+        throw std::runtime_error("failed to publish vector output " + data_path);
-+    }
-+    if (std::rename(graph_temp.c_str(), args.index_prefix.c_str()) != 0)
-+    {
-+        std::remove(graph_temp.c_str());
-+        std::remove(data_path.c_str());
-+        throw std::runtime_error("failed to publish graph output " + args.index_prefix);
-+    }
-+}
-+
-+template <typename T>
-+int run_typed(const Args &args)
-+{
-+    uint32_t dim = 0;
-+    uint32_t npts = 0;
-+    uint64_t base_npts = 0;
-+    const double load_start = now_sec();
-+    std::vector<T> data = load_slice<T>(args, dim, base_npts, npts);
-+    const double load_seconds = now_sec() - load_start;
-+
-+    if ((size_t)npts > std::numeric_limits<size_t>::max() / sizeof(uint32_t) / (size_t)args.R)
-+        throw std::runtime_error("N * R overflows the host graph allocation");
-+    std::vector<uint32_t> graph((size_t)npts * args.R);
-+    std::vector<uint32_t> degree(npts);
-+
-+    const double gpu_start = now_sec();
-+    int ret = -1;
-+    if constexpr (std::is_same<T, uint8_t>::value)
-+    {
-+        if (args.builder == "vnew2")
-+            ret = gpu_vamana_vnew2_build(data.data(), npts, dim, args.R, args.L, args.C, args.STEPS,
-+                                         graph.data(), degree.data());
-+        else
-+            ret = gpu_vamana_build(data.data(), npts, dim, args.R, args.L, args.C, args.STEPS,
-+                                   graph.data(), degree.data());
-+    }
-+    else
-+    {
-+        if (args.builder == "vnew2")
-+            ret = gpu_vamana_vnew2_build_float(data.data(), npts, dim, args.R, args.L, args.C, args.STEPS,
-+                                               graph.data(), degree.data());
-+        else
-+            ret = gpu_vamana_build_float(data.data(), npts, dim, args.R, args.L, args.C, args.STEPS,
-+                                         graph.data(), degree.data());
-+    }
-+    const double gpu_call_seconds = now_sec() - gpu_start;
-+
-+    GPUVamanaStats stats{};
-+    uint32_t medoid = 0;
-+    if (args.builder == "vnew2")
-+    {
-+        medoid = gpu_vamana_vnew2_get_last_medoid();
-+        gpu_vamana_vnew2_get_last_stats(&stats);
-+    }
-+    else
-+    {
-+        medoid = gpu_vamana_get_last_medoid();
-+        gpu_vamana_get_last_stats(&stats);
-+    }
-+
-+    uint64_t edge_count = 0;
-+    uint64_t invalid_neighbor_count = 0;
-+    uint64_t self_loop_count = 0;
-+    uint64_t duplicate_edge_count = 0;
-+    uint64_t degree_overflow_count = 0;
-+    uint32_t max_degree = 0;
-+    std::vector<uint32_t> row;
-+    row.reserve(args.R);
-+    for (uint32_t node = 0; node < npts; ++node)
-+    {
-+        const uint32_t d = degree[node];
-+        edge_count += d;
-+        if (d > max_degree)
-+            max_degree = d;
-+        if (d > args.R)
-+            ++degree_overflow_count;
-+        row.clear();
-+        for (uint32_t slot = 0; slot < std::min(d, args.R); ++slot)
-+        {
-+            const uint32_t neighbor = graph[(size_t)node * args.R + slot];
-+            if (neighbor >= npts)
-+            {
-+                ++invalid_neighbor_count;
-+                continue;
-+            }
-+            if (neighbor == node)
-+                ++self_loop_count;
-+            row.push_back(neighbor);
-+        }
-+        std::sort(row.begin(), row.end());
-+        const auto unique_end = std::unique(row.begin(), row.end());
-+        duplicate_edge_count += (uint64_t)std::distance(unique_end, row.end());
-+    }
-+    const bool graph_valid = ret == 0 && invalid_neighbor_count == 0 &&
-+                             self_loop_count == 0 && duplicate_edge_count == 0 &&
-+                             degree_overflow_count == 0 && medoid < npts;
-+    if (graph_valid)
-+        save_memory_index(args, data, npts, dim, graph, degree, medoid);
-+
-+    std::cout << "{\n"
-+              << "  \"data_path\": \"" << json_escape(args.data_path) << "\",\n"
-+              << "  \"data_type\": \"" << args.data_type << "\",\n"
-+              << "  \"base_npts\": " << base_npts << ",\n"
-+              << "  \"offset\": " << args.offset << ",\n"
-+              << "  \"npts\": " << npts << ",\n"
-+              << "  \"dim\": " << dim << ",\n"
-+              << "  \"R\": " << args.R << ",\n"
-+              << "  \"L\": " << args.L << ",\n"
-+              << "  \"C\": " << args.C << ",\n"
-+              << "  \"STEPS\": " << args.STEPS << ",\n"
-+              << "  \"builder\": \"" << args.builder << "\",\n"
-+              << "  \"index_prefix\": \"" << json_escape(args.index_prefix) << "\",\n"
-+              << "  \"memory_index_serialized\": " << (!args.index_prefix.empty() && graph_valid ? "true" : "false")
-+              << ",\n"
-+              << "  \"load_seconds\": " << load_seconds << ",\n"
-+              << "  \"gpu_call_seconds\": " << gpu_call_seconds << ",\n"
-+              << "  \"stats_gpu_build_seconds\": " << stats.gpu_build_seconds << ",\n"
-+              << "  \"stats_h2d_seconds\": " << stats.h2d_seconds << ",\n"
-+              << "  \"stats_search_online_insert_seconds\": " << stats.search_online_insert_seconds << ",\n"
-+              << "  \"stats_reverse_seconds\": " << stats.reverse_seconds << ",\n"
-+              << "  \"stats_final_prune_seconds\": " << stats.final_prune_seconds << ",\n"
-+              << "  \"stats_d2h_seconds\": " << stats.d2h_seconds << ",\n"
-+              << "  \"selective_active_nodes\": " << stats.selective_active_nodes << ",\n"
-+              << "  \"medoid\": " << medoid << ",\n"
-+              << "  \"edge_count\": " << edge_count << ",\n"
-+              << "  \"avg_degree\": " << (double)edge_count / (double)npts << ",\n"
-+              << "  \"max_degree\": " << max_degree << ",\n"
-+              << "  \"invalid_neighbor_count\": " << invalid_neighbor_count << ",\n"
-+              << "  \"self_loop_count\": " << self_loop_count << ",\n"
-+              << "  \"duplicate_edge_count\": " << duplicate_edge_count << ",\n"
-+              << "  \"degree_overflow_count\": " << degree_overflow_count << ",\n"
-+              << "  \"graph_valid\": " << (graph_valid ? "true" : "false") << ",\n"
-+              << "  \"return_code\": " << ret << "\n"
-+              << "}\n";
-+    return graph_valid ? 0 : (ret != 0 ? ret : 3);
-+}
-+}
-+
-+int main(int argc, char **argv)
-+{
-+    try
-+    {
-+        Args args = parse_args(argc, argv);
-+        const std::string executable = argc > 0 ? argv[0] : "";
-+        const size_t separator = executable.find_last_of("/\\");
-+        const std::string executable_name =
-+            separator == std::string::npos ? executable : executable.substr(separator + 1);
-+        if (executable_name == "gpu_vamana_memory_index" && args.index_prefix.empty())
-+            throw std::runtime_error("gpu_vamana_memory_index requires --index_prefix");
-+        if (executable_name == "gpu_vamana_memory_index" && args.builder != "vnew2")
-+            throw std::runtime_error("gpu_vamana_memory_index requires --builder vnew2");
-+        if (args.data_type == "uint8")
-+            return run_typed<uint8_t>(args);
-+        return run_typed<float>(args);
-+    }
-+    catch (const std::exception &e)
-+    {
-+        usage(argv[0]);
-+        std::cerr << "error: " << e.what() << std::endl;
-+        return 2;
-+    }
-+}
 diff --git a/apps/utils/gpu_stitched_vamana_index.cpp b/apps/utils/gpu_stitched_vamana_index.cpp
 new file mode 100644
 index 00000000..db8e47e5
@@ -1449,6 +989,462 @@ index 00000000..db8e47e5
 +        return 1;
 +    }
 +}
+diff --git a/apps/utils/gpu_vamana_memory_index.cpp b/apps/utils/gpu_vamana_memory_index.cpp
+new file mode 100644
+index 00000000..3bc6cc33
+--- /dev/null
++++ b/apps/utils/gpu_vamana_memory_index.cpp
+@@ -0,0 +1,450 @@
++// Copyright (c) 2026 DANCE Authors. Licensed under the MIT License.
++#include "gpu_vamana_builder.h"
++
++#include <chrono>
++#include <cstdio>
++#include <cstdint>
++#include <fstream>
++#include <iostream>
++#include <stdexcept>
++#include <string>
++#include <algorithm>
++#include <limits>
++#include <type_traits>
++#include <vector>
++
++namespace
++{
++double now_sec()
++{
++    using clock = std::chrono::high_resolution_clock;
++    static const auto t0 = clock::now();
++    return std::chrono::duration<double>(clock::now() - t0).count();
++}
++
++std::string json_escape(const std::string &value)
++{
++    std::string escaped;
++    escaped.reserve(value.size());
++    for (const unsigned char ch : value)
++    {
++        switch (ch)
++        {
++        case '"':
++            escaped += "\\\"";
++            break;
++        case '\\':
++            escaped += "\\\\";
++            break;
++        case '\b':
++            escaped += "\\b";
++            break;
++        case '\f':
++            escaped += "\\f";
++            break;
++        case '\n':
++            escaped += "\\n";
++            break;
++        case '\r':
++            escaped += "\\r";
++            break;
++        case '\t':
++            escaped += "\\t";
++            break;
++        default:
++            if (ch < 0x20)
++                throw std::runtime_error("control character in JSON path");
++            escaped.push_back(static_cast<char>(ch));
++        }
++    }
++    return escaped;
++}
++
++struct Args
++{
++    std::string data_path;
++    std::string data_type = "uint8";
++    std::string index_prefix;
++    uint64_t offset = 0;
++    uint32_t npts = 0;
++    uint32_t R = 42;
++    uint32_t L = 100;
++    uint32_t C = 80;
++    uint32_t STEPS = 64;
++    std::string builder = "vnew2";
++};
++
++uint64_t parse_uint64(const std::string &text, const std::string &option)
++{
++    if (text.empty() || !std::all_of(text.begin(), text.end(), [](unsigned char ch) { return ch >= '0' && ch <= '9'; }))
++        throw std::runtime_error(option + " must be an unsigned integer");
++    size_t consumed = 0;
++    unsigned long long value = 0;
++    try
++    {
++        value = std::stoull(text, &consumed, 10);
++    }
++    catch (const std::exception &)
++    {
++        throw std::runtime_error(option + " must be an unsigned integer");
++    }
++    if (consumed != text.size())
++        throw std::runtime_error(option + " must be an unsigned integer");
++    return static_cast<uint64_t>(value);
++}
++
++uint32_t parse_uint32(const std::string &text, const std::string &option, bool allow_zero)
++{
++    const uint64_t value = parse_uint64(text, option);
++    if (value > std::numeric_limits<uint32_t>::max() || (!allow_zero && value == 0))
++        throw std::runtime_error(option + (allow_zero ? " is out of uint32 range" : " must be in [1, UINT32_MAX]"));
++    return static_cast<uint32_t>(value);
++}
++
++void usage(const char *argv0)
++{
++    std::cerr << "Usage: " << argv0
++              << " --data_path <bin> [--data_type uint8|float] [--offset N] [--npts N|0=all]"
++              << " [--index_prefix PATH]"
++              << " [--R 42] [--L 100] [--C 80] [--STEPS 64] [--builder vnew2|v8]\n";
++}
++
++Args parse_args(int argc, char **argv)
++{
++    Args args;
++    for (int i = 1; i < argc; i++)
++    {
++        std::string key = argv[i];
++        auto need_value = [&]() -> std::string {
++            if (i + 1 >= argc)
++                throw std::runtime_error("missing value for " + key);
++            return argv[++i];
++        };
++        if (key == "--data_path")
++            args.data_path = need_value();
++        else if (key == "--data_type")
++            args.data_type = need_value();
++        else if (key == "--index_prefix")
++            args.index_prefix = need_value();
++        else if (key == "--offset")
++            args.offset = parse_uint64(need_value(), key);
++        else if (key == "--npts")
++            args.npts = parse_uint32(need_value(), key, true);
++        else if (key == "--R")
++            args.R = parse_uint32(need_value(), key, false);
++        else if (key == "--L")
++            args.L = parse_uint32(need_value(), key, false);
++        else if (key == "--C")
++            args.C = parse_uint32(need_value(), key, false);
++        else if (key == "--STEPS")
++            args.STEPS = parse_uint32(need_value(), key, false);
++        else if (key == "--builder")
++            args.builder = need_value();
++        else
++            throw std::runtime_error("unknown argument: " + key);
++    }
++    if (args.data_path.empty())
++        throw std::runtime_error("--data_path is required");
++    if (args.data_type != "uint8" && args.data_type != "float")
++        throw std::runtime_error("--data_type must be uint8 or float");
++    if (args.builder != "vnew2" && args.builder != "v8")
++        throw std::runtime_error("--builder must be vnew2 or v8");
++    (void)json_escape(args.data_path);
++    (void)json_escape(args.index_prefix);
++    return args;
++}
++
++template <typename T>
++std::vector<T> load_slice(const Args &args, uint32_t &dim, uint64_t &base_npts, uint32_t &loaded_npts)
++{
++    std::ifstream reader(args.data_path, std::ios::binary);
++    if (!reader)
++        throw std::runtime_error("failed to open " + args.data_path);
++
++    uint32_t npts32 = 0;
++    uint32_t dim32 = 0;
++    reader.read(reinterpret_cast<char *>(&npts32), sizeof(uint32_t));
++    reader.read(reinterpret_cast<char *>(&dim32), sizeof(uint32_t));
++    if (!reader)
++        throw std::runtime_error("failed to read DiskANN matrix header");
++    base_npts = npts32;
++    dim = dim32;
++    const uint64_t element_bytes = sizeof(T);
++    if (dim == 0 || base_npts > (std::numeric_limits<uint64_t>::max() - 8) / ((uint64_t)dim * element_bytes))
++        throw std::runtime_error("DiskANN matrix shape overflows its byte-size calculation");
++    const uint64_t expected_bytes = 8 + base_npts * (uint64_t)dim * element_bytes;
++    reader.seekg(0, std::ios::end);
++    const std::streamoff actual_bytes = reader.tellg();
++    if (actual_bytes < 0 || static_cast<uint64_t>(actual_bytes) != expected_bytes)
++        throw std::runtime_error("DiskANN matrix header does not match exact file size");
++    const uint64_t remaining = base_npts - std::min<uint64_t>(args.offset, base_npts);
++    const uint64_t requested = args.npts == 0 ? remaining : args.npts;
++    if (args.offset > base_npts || requested > remaining || requested > std::numeric_limits<uint32_t>::max())
++        throw std::runtime_error("requested slice exceeds base file point count");
++    if (requested == 0 || dim == 0)
++        throw std::runtime_error("requested slice and dimension must be nonzero");
++    loaded_npts = static_cast<uint32_t>(requested);
++
++    std::vector<T> data((size_t)loaded_npts * dim);
++    const uint64_t byte_offset = 2 * sizeof(uint32_t) + args.offset * (uint64_t)dim * sizeof(T);
++    reader.seekg((std::streamoff)byte_offset, std::ios::beg);
++    reader.read(reinterpret_cast<char *>(data.data()), (std::streamsize)(data.size() * sizeof(T)));
++    if (!reader)
++        throw std::runtime_error("failed to read requested slice");
++    return data;
++}
++
++template <typename T>
++void save_memory_index(const Args &args, const std::vector<T> &data, uint32_t npts, uint32_t dim,
++                       const std::vector<uint32_t> &graph, const std::vector<uint32_t> &degree, uint32_t medoid)
++{
++    if (args.index_prefix.empty())
++        return;
++    const std::string data_path = args.index_prefix + ".data";
++    const std::string graph_temp = args.index_prefix + ".tmp";
++    const std::string data_temp = data_path + ".tmp";
++    if (std::ifstream(args.index_prefix, std::ios::binary) || std::ifstream(data_path, std::ios::binary) ||
++        std::ifstream(graph_temp, std::ios::binary) || std::ifstream(data_temp, std::ios::binary))
++        throw std::runtime_error("refusing to overwrite existing memory-index output");
++    const size_t edge_count = [&]() {
++        size_t total = 0;
++        for (uint32_t value : degree)
++            total += std::min(value, args.R);
++        return total;
++    }();
++    const uint32_t max_degree = *std::max_element(degree.begin(), degree.end());
++    const size_t frozen_points = 0;
++    const size_t header_bytes = sizeof(size_t) + 2 * sizeof(uint32_t) + sizeof(size_t);
++    if ((size_t)npts > (std::numeric_limits<size_t>::max() - header_bytes) / sizeof(uint32_t) ||
++        edge_count > (std::numeric_limits<size_t>::max() - header_bytes -
++                      (size_t)npts * sizeof(uint32_t)) / sizeof(uint32_t))
++        throw std::runtime_error("serialized graph size overflows size_t");
++    const size_t graph_bytes =
++        header_bytes + (size_t)npts * sizeof(uint32_t) + edge_count * sizeof(uint32_t);
++    const size_t data_bytes = 2 * sizeof(uint32_t) + data.size() * sizeof(T);
++    try
++    {
++        std::ofstream writer(graph_temp, std::ios::binary | std::ios::trunc);
++        if (!writer)
++            throw std::runtime_error("failed to create graph temporary output " + graph_temp);
++        writer.write(reinterpret_cast<const char *>(&graph_bytes), sizeof(graph_bytes));
++        writer.write(reinterpret_cast<const char *>(&max_degree), sizeof(max_degree));
++        writer.write(reinterpret_cast<const char *>(&medoid), sizeof(medoid));
++        writer.write(reinterpret_cast<const char *>(&frozen_points), sizeof(frozen_points));
++        for (uint32_t node = 0; node < npts; ++node)
++        {
++            const uint32_t row_degree = std::min(degree[node], args.R);
++            writer.write(reinterpret_cast<const char *>(&row_degree), sizeof(row_degree));
++            writer.write(reinterpret_cast<const char *>(graph.data() + (size_t)node * args.R),
++                         (size_t)row_degree * sizeof(uint32_t));
++        }
++        if (!writer)
++            throw std::runtime_error("failed while writing graph temporary output " + graph_temp);
++        writer.close();
++        if (!writer)
++            throw std::runtime_error("failed while closing graph temporary output " + graph_temp);
++    }
++    catch (...)
++    {
++        std::remove(graph_temp.c_str());
++        throw;
++    }
++    try
++    {
++        std::ofstream writer(data_temp, std::ios::binary | std::ios::trunc);
++        if (!writer)
++            throw std::runtime_error("failed to create vector temporary output " + data_temp);
++        writer.write(reinterpret_cast<const char *>(&npts), sizeof(npts));
++        writer.write(reinterpret_cast<const char *>(&dim), sizeof(dim));
++        writer.write(reinterpret_cast<const char *>(data.data()), (std::streamsize)(data.size() * sizeof(T)));
++        if (!writer)
++            throw std::runtime_error("failed while writing vector temporary output " + data_temp);
++        writer.close();
++        if (!writer)
++            throw std::runtime_error("failed while closing vector temporary output " + data_temp);
++    }
++    catch (...)
++    {
++        std::remove(graph_temp.c_str());
++        std::remove(data_temp.c_str());
++        throw;
++    }
++    std::ifstream graph_reader(graph_temp, std::ios::binary | std::ios::ate);
++    std::ifstream data_reader(data_temp, std::ios::binary | std::ios::ate);
++    if (!graph_reader || graph_reader.tellg() != static_cast<std::streamoff>(graph_bytes) ||
++        !data_reader || data_reader.tellg() != static_cast<std::streamoff>(data_bytes))
++    {
++        graph_reader.close();
++        data_reader.close();
++        std::remove(graph_temp.c_str());
++        std::remove(data_temp.c_str());
++        throw std::runtime_error("serialized temporary output size does not match its DiskANN layout");
++    }
++    graph_reader.close();
++    data_reader.close();
++    if (std::rename(data_temp.c_str(), data_path.c_str()) != 0)
++    {
++        std::remove(graph_temp.c_str());
++        std::remove(data_temp.c_str());
++        throw std::runtime_error("failed to publish vector output " + data_path);
++    }
++    if (std::rename(graph_temp.c_str(), args.index_prefix.c_str()) != 0)
++    {
++        std::remove(graph_temp.c_str());
++        std::remove(data_path.c_str());
++        throw std::runtime_error("failed to publish graph output " + args.index_prefix);
++    }
++}
++
++template <typename T>
++int run_typed(const Args &args)
++{
++    uint32_t dim = 0;
++    uint32_t npts = 0;
++    uint64_t base_npts = 0;
++    const double load_start = now_sec();
++    std::vector<T> data = load_slice<T>(args, dim, base_npts, npts);
++    const double load_seconds = now_sec() - load_start;
++
++    if ((size_t)npts > std::numeric_limits<size_t>::max() / sizeof(uint32_t) / (size_t)args.R)
++        throw std::runtime_error("N * R overflows the host graph allocation");
++    std::vector<uint32_t> graph((size_t)npts * args.R);
++    std::vector<uint32_t> degree(npts);
++
++    const double gpu_start = now_sec();
++    int ret = -1;
++    if constexpr (std::is_same<T, uint8_t>::value)
++    {
++        if (args.builder == "vnew2")
++            ret = gpu_vamana_vnew2_build(data.data(), npts, dim, args.R, args.L, args.C, args.STEPS,
++                                         graph.data(), degree.data());
++        else
++            ret = gpu_vamana_build(data.data(), npts, dim, args.R, args.L, args.C, args.STEPS,
++                                   graph.data(), degree.data());
++    }
++    else
++    {
++        if (args.builder == "vnew2")
++            ret = gpu_vamana_vnew2_build_float(data.data(), npts, dim, args.R, args.L, args.C, args.STEPS,
++                                               graph.data(), degree.data());
++        else
++            ret = gpu_vamana_build_float(data.data(), npts, dim, args.R, args.L, args.C, args.STEPS,
++                                         graph.data(), degree.data());
++    }
++    const double gpu_call_seconds = now_sec() - gpu_start;
++
++    GPUVamanaStats stats{};
++    uint32_t medoid = 0;
++    if (args.builder == "vnew2")
++    {
++        medoid = gpu_vamana_vnew2_get_last_medoid();
++        gpu_vamana_vnew2_get_last_stats(&stats);
++    }
++    else
++    {
++        medoid = gpu_vamana_get_last_medoid();
++        gpu_vamana_get_last_stats(&stats);
++    }
++
++    uint64_t edge_count = 0;
++    uint64_t invalid_neighbor_count = 0;
++    uint64_t self_loop_count = 0;
++    uint64_t duplicate_edge_count = 0;
++    uint64_t degree_overflow_count = 0;
++    uint32_t max_degree = 0;
++    std::vector<uint32_t> row;
++    row.reserve(args.R);
++    for (uint32_t node = 0; node < npts; ++node)
++    {
++        const uint32_t d = degree[node];
++        edge_count += d;
++        if (d > max_degree)
++            max_degree = d;
++        if (d > args.R)
++            ++degree_overflow_count;
++        row.clear();
++        for (uint32_t slot = 0; slot < std::min(d, args.R); ++slot)
++        {
++            const uint32_t neighbor = graph[(size_t)node * args.R + slot];
++            if (neighbor >= npts)
++            {
++                ++invalid_neighbor_count;
++                continue;
++            }
++            if (neighbor == node)
++                ++self_loop_count;
++            row.push_back(neighbor);
++        }
++        std::sort(row.begin(), row.end());
++        const auto unique_end = std::unique(row.begin(), row.end());
++        duplicate_edge_count += (uint64_t)std::distance(unique_end, row.end());
++    }
++    const bool graph_valid = ret == 0 && invalid_neighbor_count == 0 &&
++                             self_loop_count == 0 && duplicate_edge_count == 0 &&
++                             degree_overflow_count == 0 && medoid < npts;
++    if (graph_valid)
++        save_memory_index(args, data, npts, dim, graph, degree, medoid);
++
++    std::cout << "{\n"
++              << "  \"data_path\": \"" << json_escape(args.data_path) << "\",\n"
++              << "  \"data_type\": \"" << args.data_type << "\",\n"
++              << "  \"base_npts\": " << base_npts << ",\n"
++              << "  \"offset\": " << args.offset << ",\n"
++              << "  \"npts\": " << npts << ",\n"
++              << "  \"dim\": " << dim << ",\n"
++              << "  \"R\": " << args.R << ",\n"
++              << "  \"L\": " << args.L << ",\n"
++              << "  \"C\": " << args.C << ",\n"
++              << "  \"STEPS\": " << args.STEPS << ",\n"
++              << "  \"builder\": \"" << args.builder << "\",\n"
++              << "  \"index_prefix\": \"" << json_escape(args.index_prefix) << "\",\n"
++              << "  \"memory_index_serialized\": " << (!args.index_prefix.empty() && graph_valid ? "true" : "false")
++              << ",\n"
++              << "  \"load_seconds\": " << load_seconds << ",\n"
++              << "  \"gpu_call_seconds\": " << gpu_call_seconds << ",\n"
++              << "  \"stats_gpu_build_seconds\": " << stats.gpu_build_seconds << ",\n"
++              << "  \"stats_h2d_seconds\": " << stats.h2d_seconds << ",\n"
++              << "  \"stats_search_online_insert_seconds\": " << stats.search_online_insert_seconds << ",\n"
++              << "  \"stats_reverse_seconds\": " << stats.reverse_seconds << ",\n"
++              << "  \"stats_final_prune_seconds\": " << stats.final_prune_seconds << ",\n"
++              << "  \"stats_d2h_seconds\": " << stats.d2h_seconds << ",\n"
++              << "  \"selective_active_nodes\": " << stats.selective_active_nodes << ",\n"
++              << "  \"medoid\": " << medoid << ",\n"
++              << "  \"edge_count\": " << edge_count << ",\n"
++              << "  \"avg_degree\": " << (double)edge_count / (double)npts << ",\n"
++              << "  \"max_degree\": " << max_degree << ",\n"
++              << "  \"invalid_neighbor_count\": " << invalid_neighbor_count << ",\n"
++              << "  \"self_loop_count\": " << self_loop_count << ",\n"
++              << "  \"duplicate_edge_count\": " << duplicate_edge_count << ",\n"
++              << "  \"degree_overflow_count\": " << degree_overflow_count << ",\n"
++              << "  \"graph_valid\": " << (graph_valid ? "true" : "false") << ",\n"
++              << "  \"return_code\": " << ret << "\n"
++              << "}\n";
++    return graph_valid ? 0 : (ret != 0 ? ret : 3);
++}
++}
++
++int main(int argc, char **argv)
++{
++    try
++    {
++        Args args = parse_args(argc, argv);
++        const std::string executable = argc > 0 ? argv[0] : "";
++        const size_t separator = executable.find_last_of("/\\");
++        const std::string executable_name =
++            separator == std::string::npos ? executable : executable.substr(separator + 1);
++        if (executable_name == "gpu_vamana_memory_index" && args.index_prefix.empty())
++            throw std::runtime_error("gpu_vamana_memory_index requires --index_prefix");
++        if (executable_name == "gpu_vamana_memory_index" && args.builder != "vnew2")
++            throw std::runtime_error("gpu_vamana_memory_index requires --builder vnew2");
++        if (args.data_type == "uint8")
++            return run_typed<uint8_t>(args);
++        return run_typed<float>(args);
++    }
++    catch (const std::exception &e)
++    {
++        usage(argv[0]);
++        std::cerr << "error: " << e.what() << std::endl;
++        return 2;
++    }
++}
 diff --git a/apps/utils/merge_shards.cpp b/apps/utils/merge_shards.cpp
 index 106c15ee..123f1263 100644
 --- a/apps/utils/merge_shards.cpp
@@ -1593,94 +1589,6 @@ index 00000000..ce8a68a6
 +        }
 +    }
 +    return true;
-+}
-diff --git a/include/filtered_robust_prune_reference.h b/include/filtered_robust_prune_reference.h
-new file mode 100644
-index 00000000..144615f4
---- /dev/null
-+++ b/include/filtered_robust_prune_reference.h
-@@ -0,0 +1,82 @@
-+// Copyright (c) 2026 DANCE Authors. Licensed under the MIT License.
-+#pragma once
-+
-+#include <algorithm>
-+#include <cstdint>
-+#include <functional>
-+#include <unordered_set>
-+#include <vector>
-+
-+namespace diskann
-+{
-+namespace filtered_reference
-+{
-+
-+struct Candidate
-+{
-+    uint32_t id;
-+    float distance_to_target;
-+};
-+
-+
-+
-+
-+inline std::vector<uint32_t>
-+robust_prune(const std::vector<uint32_t> &target_labels, std::vector<Candidate> candidates, uint32_t degree,
-+             float alpha, const std::function<const std::vector<uint32_t> &(uint32_t)> &labels_for,
-+             const std::function<float(uint32_t, uint32_t)> &pair_distance)
-+{
-+    std::sort(candidates.begin(), candidates.end(), [](const Candidate &left, const Candidate &right) {
-+        return left.distance_to_target < right.distance_to_target ||
-+               (left.distance_to_target == right.distance_to_target && left.id < right.id);
-+    });
-+    std::unordered_set<uint32_t> seen_ids;
-+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](const Candidate &candidate) {
-+                         return !seen_ids.insert(candidate.id).second;
-+                     }),
-+                     candidates.end());
-+
-+    std::vector<uint8_t> removed(candidates.size(), 0);
-+    std::vector<uint32_t> result;
-+    result.reserve(std::min<size_t>(degree, candidates.size()));
-+    for (size_t i = 0; i < candidates.size() && result.size() < degree; ++i)
-+    {
-+        if (removed[i])
-+            continue;
-+        result.push_back(candidates[i].id);
-+        const auto &selected_labels = labels_for(candidates[i].id);
-+        for (size_t j = i + 1; j < candidates.size(); ++j)
-+        {
-+            if (removed[j])
-+                continue;
-+            const auto &candidate_labels = labels_for(candidates[j].id);
-+            bool covered = true;
-+            auto target_it = target_labels.begin();
-+            auto candidate_it = candidate_labels.begin();
-+            while (target_it != target_labels.end() && candidate_it != candidate_labels.end())
-+            {
-+                if (*target_it < *candidate_it)
-+                    ++target_it;
-+                else if (*candidate_it < *target_it)
-+                    ++candidate_it;
-+                else
-+                {
-+                    if (!std::binary_search(selected_labels.begin(), selected_labels.end(), *target_it))
-+                    {
-+                        covered = false;
-+                        break;
-+                    }
-+                    ++target_it;
-+                    ++candidate_it;
-+                }
-+            }
-+            if (covered && alpha * pair_distance(candidates[i].id, candidates[j].id) <=
-+                               candidates[j].distance_to_target)
-+                removed[j] = 1;
-+        }
-+    }
-+    return result;
-+}
-+
-+}
 +}
 diff --git a/include/gpu_merge.h b/include/gpu_merge.h
 new file mode 100644
@@ -21144,207 +21052,3 @@ index 9580537e..43ad9dfb 100644
      reset_stream_for_reading(infile);
  }
  
-diff --git a/tools/prepare_fd12_mod12_workload.py b/tools/prepare_fd12_mod12_workload.py
-new file mode 100755
-index 00000000..e870846f
---- /dev/null
-+++ b/tools/prepare_fd12_mod12_workload.py
-@@ -0,0 +1,198 @@
-+#!/usr/bin/env python3
-+# Copyright (c) 2026 DANCE Authors. Licensed under the MIT License.
-+
-+from __future__ import annotations
-+
-+import argparse
-+import hashlib
-+import json
-+import math
-+import struct
-+from pathlib import Path
-+
-+import numpy as np
-+
-+
-+LABELS = tuple(f"NHQ_A{a}_B{b}_C{c}" for a in range(3) for b in range(2) for c in range(2))
-+DTYPES = {"float": np.float32, "float32": np.float32, "uint8": np.uint8, "int8": np.int8}
-+
-+
-+def matrix(path: Path, dtype: np.dtype) -> tuple[int, int, np.memmap]:
-+    with path.open("rb") as stream:
-+        header = stream.read(8)
-+    if len(header) != 8:
-+        raise ValueError(f"short matrix header: {path}")
-+    n, dim = struct.unpack("<II", header)
-+    expected = 8 + n * dim * np.dtype(dtype).itemsize
-+    if path.stat().st_size != expected:
-+        raise ValueError(f"invalid matrix size for {path}: expected {expected}, got {path.stat().st_size}")
-+    return n, dim, np.memmap(path, dtype=dtype, mode="r", offset=8, shape=(n, dim))
-+
-+
-+def sha256(path: Path) -> str:
-+    digest = hashlib.sha256()
-+    with path.open("rb") as stream:
-+        while block := stream.read(8 << 20):
-+            digest.update(block)
-+    return digest.hexdigest()
-+
-+
-+def write_queries(source: Path, output: Path, dtype: np.dtype, limit: int) -> tuple[int, int]:
-+    n, dim, values = matrix(source, dtype)
-+    count = min(n, limit) if limit else n
-+    with output.open("wb") as stream:
-+        stream.write(struct.pack("<II", count, dim))
-+        np.asarray(values[:count], dtype=dtype).tofile(stream)
-+    return count, dim
-+
-+
-+def write_labels(path: Path, points: int) -> list[int]:
-+    counts = [0] * len(LABELS)
-+    with path.open("w", encoding="utf-8") as stream:
-+        for point in range(points):
-+            label = point % len(LABELS)
-+            counts[label] += 1
-+            stream.write(LABELS[label] + "\n")
-+    return counts
-+
-+
-+def write_query_filters(path: Path, queries: int, seed: int) -> list[int]:
-+    repetitions = math.ceil(queries / len(LABELS))
-+    labels = np.asarray((list(range(len(LABELS))) * repetitions)[:queries], dtype=np.int32)
-+    np.random.default_rng(seed + 101).shuffle(labels)
-+    path.write_text("".join(f"{LABELS[int(label)]}\n" for label in labels), encoding="utf-8")
-+    return labels.tolist()
-+
-+
-+def exact_ground_truth(
-+    base_path: Path,
-+    query_path: Path,
-+    dtype: np.dtype,
-+    query_labels: list[int],
-+    output: Path,
-+    k: int,
-+    candidate_chunk: int,
-+    query_chunk: int,
-+) -> None:
-+    points, dim, base = matrix(base_path, dtype)
-+    queries, query_dim, query = matrix(query_path, dtype)
-+    if query_dim != dim or queries != len(query_labels):
-+        raise ValueError("query shape/filter count does not match the base")
-+    if min((points + len(LABELS) - 1 - label) // len(LABELS) for label in range(len(LABELS))) < k:
-+        raise ValueError("a label posting list contains fewer than k points")
-+
-+    result_ids = np.full((queries, k), np.iinfo(np.uint32).max, dtype=np.uint32)
-+    result_distances = np.full((queries, k), np.inf, dtype=np.float32)
-+    grouped = {label: [] for label in range(len(LABELS))}
-+    for query_id, label in enumerate(query_labels):
-+        grouped[label].append(query_id)
-+
-+    for label, query_ids in grouped.items():
-+        candidates = np.arange(label, points, len(LABELS), dtype=np.uint32)
-+        query_ids_array = np.asarray(query_ids, dtype=np.int64)
-+        for begin in range(0, len(query_ids), query_chunk):
-+            selected = query_ids_array[begin : begin + query_chunk]
-+            query_block = np.asarray(query[selected], dtype=np.float32)
-+            query_norm = np.sum(query_block * query_block, axis=1, keepdims=True)
-+            best_ids = np.full((len(selected), k), np.iinfo(np.uint32).max, dtype=np.uint32)
-+            best_distances = np.full((len(selected), k), np.inf, dtype=np.float32)
-+            for candidate_begin in range(0, len(candidates), candidate_chunk):
-+                candidate_ids = candidates[candidate_begin : candidate_begin + candidate_chunk]
-+                candidate_block = np.asarray(base[candidate_ids], dtype=np.float32)
-+                distances = (
-+                    query_norm
-+                    + np.sum(candidate_block * candidate_block, axis=1)[None, :]
-+                    - 2.0 * (query_block @ candidate_block.T)
-+                )
-+                np.maximum(distances, 0.0, out=distances)
-+                merged_distances = np.concatenate((best_distances, distances.astype(np.float32)), axis=1)
-+                merged_ids = np.concatenate(
-+                    (best_ids, np.broadcast_to(candidate_ids.astype(np.uint32), distances.shape)), axis=1
-+                )
-+                take = np.argpartition(merged_distances, k - 1, axis=1)[:, :k]
-+                rows = np.arange(len(selected))[:, None]
-+                best_distances = merged_distances[rows, take]
-+                best_ids = merged_ids[rows, take]
-+                order = np.argsort(best_distances, axis=1)
-+                best_distances = np.take_along_axis(best_distances, order, axis=1)
-+                best_ids = np.take_along_axis(best_ids, order, axis=1)
-+            result_ids[selected] = best_ids
-+            result_distances[selected] = best_distances
-+        print(f"[fd12] exact GT complete: {LABELS[label]} ({len(query_ids)} queries)", flush=True)
-+
-+    with output.open("wb") as stream:
-+        stream.write(struct.pack("<II", queries, k))
-+        result_ids.tofile(stream)
-+        result_distances.tofile(stream)
-+
-+
-+def main() -> None:
-+    parser = argparse.ArgumentParser(description=__doc__)
-+    parser.add_argument("--base-file", type=Path, required=True)
-+    parser.add_argument("--query-file", type=Path, required=True)
-+    parser.add_argument("--data-type", choices=tuple(DTYPES), required=True)
-+    parser.add_argument("--output-dir", type=Path, required=True)
-+    parser.add_argument("--seed", type=int, default=20260704)
-+    parser.add_argument("--max-queries", type=int, default=240)
-+    parser.add_argument("--gt-k", type=int, default=100)
-+    parser.add_argument("--compute-gt", action="store_true")
-+    parser.add_argument("--candidate-chunk", type=int, default=200000)
-+    parser.add_argument("--query-chunk", type=int, default=4)
-+    args = parser.parse_args()
-+    if args.output_dir.exists():
-+        raise SystemExit(f"refusing to reuse output directory: {args.output_dir}")
-+    if min(args.max_queries, args.gt_k, args.candidate_chunk, args.query_chunk) <= 0:
-+        raise SystemExit("query, k and chunk parameters must be positive")
-+
-+    dtype = DTYPES[args.data_type]
-+    points, dim, _ = matrix(args.base_file, dtype)
-+    args.output_dir.mkdir(parents=True)
-+    labels_path = args.output_dir / "labels.txt"
-+    queries_path = args.output_dir / "queries.bin"
-+    filters_path = args.output_dir / "query_filters.txt"
-+    truth_path = args.output_dir / "groundtruth.bin"
-+    query_count, query_dim = write_queries(args.query_file, queries_path, dtype, args.max_queries)
-+    if query_dim != dim:
-+        raise ValueError(f"query dimension {query_dim} != base dimension {dim}")
-+    counts = write_labels(labels_path, points)
-+    query_labels = write_query_filters(filters_path, query_count, args.seed)
-+    if args.compute_gt:
-+        exact_ground_truth(
-+            args.base_file, queries_path, dtype, query_labels, truth_path,
-+            args.gt_k, args.candidate_chunk, args.query_chunk,
-+        )
-+
-+    outputs = (labels_path, queries_path, filters_path) + ((truth_path,) if args.compute_gt else ())
-+    manifest = {
-+        "schema": "dance-filtered-fd12-v1",
-+        "base_file": str(args.base_file.resolve()),
-+        "base_size": args.base_file.stat().st_size,
-+        "base_sha256": sha256(args.base_file),
-+        "query_source": str(args.query_file.resolve()),
-+        "query_source_size": args.query_file.stat().st_size,
-+        "query_source_sha256": sha256(args.query_file),
-+        "data_type": args.data_type,
-+        "points": points,
-+        "dimensions": dim,
-+        "queries": query_count,
-+        "seed": args.seed,
-+        "assignment": "point_id modulo 12",
-+        "query_assignment": "balanced labels shuffled by numpy default_rng(seed + 101)",
-+        "labels": list(LABELS),
-+        "label_counts": counts,
-+        "ground_truth": "exhaustive float32 squared L2 inside the selected label posting list"
-+        if args.compute_gt else "not generated",
-+        "ground_truth_k": args.gt_k if args.compute_gt else 0,
-+        "outputs": {
-+            path.name: {"size": path.stat().st_size, "sha256": sha256(path)}
-+            for path in outputs
-+        },
-+    }
-+    (args.output_dir / "manifest.json").write_text(
-+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-+    )
-+    print(f"[fd12] wrote {args.output_dir}")
-+
-+
-+if __name__ == "__main__":
-+    main()

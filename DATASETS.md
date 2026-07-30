@@ -18,25 +18,15 @@ The repository does not redistribute these vectors. Record the source URL, byte 
 
 DEEP1M and DEEP10M are the first 1,000,000 and 10,000,000 rows of the DEEP1B base file. Preserve the DiskANN binary header and replace its vector count with the selected prefix size. Queries are not truncated.
 
-## Filtered FD12 workload
+## Filtered workloads
 
-The release gate uses a deterministic twelve-label workload. Each base vector receives label `point_id modulo 12`. Query labels are balanced across the twelve labels and shuffled with seed `20260704 + 101`.
-
-Generate the labels, query copy, exact filtered ground truth, and a manifest containing input and output SHA-256 digests:
-
-```bash
-python3 tools/prepare_fd12_mod12_workload.py \
-  --base-file /data/deep10M_base.fbin \
-  --query-file /data/deep_query.fbin \
-  --data-type float \
-  --output-dir /data/deep10M_fd12 \
-  --seed 20260704 \
-  --max-queries 240 \
-  --gt-k 100 \
-  --compute-gt
-```
-
-The exact ground truth is computed by exhaustive FP32 squared-L2 search within the selected label posting list.
+The paper evaluates a 47-label geometry-aware overlapping-label procedure on
+DEEP, COLOR, and SIFT, and a real-metadata workload on YFCC1M. The prepared
+labels, queries, exact ground truth, and input manifests belong to the paper's
+data artifact; they are inputs to DANCE and are not alternative construction
+implementations. Exact filtered ground truth is computed by the upstream
+DiskANN `compute_groundtruth_for_filters` utility using FP32 squared-L2
+distance within each selected label posting list.
 
 ## File formats
 

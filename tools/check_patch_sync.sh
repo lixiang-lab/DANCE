@@ -10,10 +10,9 @@ artifact_root=$(cd "$(dirname "$0")/.." && pwd)
 patched_root=$(cd "$1" && pwd)
 
 files=(
-    apps/utils/gpu_shard_microbench.cpp
+    apps/utils/gpu_vamana_memory_index.cpp
     apps/utils/gpu_stitched_vamana_index.cpp
     include/filtered_label_coverage.cuh
-    include/filtered_robust_prune_reference.h
     include/gpu_merge.h
     include/gpu_vamana_builder.h
     include/gpu_vamana_config.h
@@ -23,7 +22,6 @@ files=(
     src/gpu_vamana_uint8.cu
     src/gpu_vamana_vnew2.cu
     src/gpu_vamana_vnew2_handoff.cu
-    tools/prepare_fd12_mod12_workload.py
 )
 
 for file in "${files[@]}"; do
