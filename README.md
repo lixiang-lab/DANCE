@@ -12,6 +12,7 @@ This is intentionally a minimal repository. It contains:
 
 - DANCE-authored CUDA and C++ source files;
 - a patch for integrating DANCE into a fixed Microsoft DiskANN revision;
+- deterministic generators for the paper's synthetic and YFCC1M filtered workloads;
 - build, invocation, dataset, and validation documentation.
 
 It does not contain experimental logs, generated results, figures, indexes, datasets, competitor source code, retired implementations, or ablation controls. It also does not mirror the Microsoft DiskANN repository.
