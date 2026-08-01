@@ -52,6 +52,17 @@ cmake -S . -B build_filtered \
 cmake --build build_filtered -j"$(nproc)"
 ```
 
+Build the FP32 quality profile used by the Figure 10 GPU-StitchedVamana gate:
+
+```bash
+cmake -S . -B build_quality \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DUSE_GPU_VAMANA=ON \
+  -DDANCE_PROFILE=QUALITY \
+  -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build build_quality -j"$(nproc)"
+```
+
 Use CUDA architecture 89 for RTX 4090 and 120 for RTX PRO 6000.
 
 ## Standard Vamana
@@ -83,7 +94,7 @@ Filtered search uses DiskANN's ordinary `search_memory_index` or `search_disk_in
 ## GPU-StitchedVamana
 
 ```bash
-build_filtered/apps/utils/gpu_stitched_vamana_index \
+build_quality/apps/utils/gpu_stitched_vamana_index \
   --data_type float \
   --data_path /data/base.fbin \
   --label_file /data/labels.txt \

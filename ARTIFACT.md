@@ -1,6 +1,6 @@
 # Artifact scope
 
-Immutable release: [`artifact-v1.0.11`](https://github.com/lixiang-lab/DANCE/releases/tag/artifact-v1.0.11).
+Immutable release: [`artifact-v1.0.12`](https://github.com/lixiang-lab/DANCE/releases/tag/artifact-v1.0.12).
 
 | Paper capability | Released implementation | Entry point |
 |---|---|---|
