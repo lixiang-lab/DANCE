@@ -4,7 +4,7 @@ This is the artifact for:
 
 > **DANCE: GPU Construction of Standard and Filtered DiskANN Indexes for Large-Scale Vector Search**
 
-The manuscript is being prepared for submission to **PVLDB / VLDB 2027**. This repository contains the latest standard DANCE Vamana, GPU-FilteredVamana, and GPU-StitchedVamana implementations used by the paper.
+The manuscript has been submitted to **PVLDB / VLDB 2027**. This repository contains the standard DANCE Vamana, GPU-FilteredVamana, and GPU-StitchedVamana implementations used to produce the paper's reported results.
 
 ## Scope
 
